@@ -15,20 +15,38 @@
 ↓
 自动执行：
 1. 检查是否有未推送的前序章节（如 Chapter 5 未完成则先推送）
-2. 生成本章 NOTES.md
+2. 生成本章 NOTES.md（如果不存在）
    - 核心收获
    - Bug修复记录
    - 代码对齐差异
    - 深度思考
-3. Git提交并推送
+3. 确保当前在 main 分支，且工作目录干净
+4. 创建干净的章节分支（从 main）
+   - git checkout main
+   - git pull origin main
+   - git checkout -b chapterX
+5. 提交本章文件（只包含 chapterX/ 目录下的文件）
    - git add chapterX/
    - git commit -m "完成第X章: 标题"
-   - git checkout -b chapterX (如果不存在)
-   - git push origin chapterX
+   - git push -u origin chapterX
+6. 报告完成状态，提供 PR 链接
+   - https://github.com/Hfuuwzy/Agent_study/pull/new/chapterX
+7. 切换回 main，等待用户在 GitHub 合并 PR
    - git checkout main
-   - git merge chapterX
-4. 报告完成状态，进入下一章准备
+   
+【用户在 GitHub 合并 PR 后】
+↓
+8. 本地同步（用户需要时执行）
+   - git pull origin main
+   - git branch -d chapterX  # 删除已合并的本地分支
 ```
+
+**重要**：
+- ✅ 章节分支**只包含本章文件**，不携带历史提交
+- ✅ 用户负责在 GitHub 上创建 PR 并合并
+- ✅ 合并后本地执行 `git pull origin main` 同步
+- ❌ 不要在本地执行 `git merge chapterX`（会导致历史混乱）
+- ❌ 不要强制推送（`--force`），使用 `--force-with-lease`
 
 ### 每章学习步骤
 
