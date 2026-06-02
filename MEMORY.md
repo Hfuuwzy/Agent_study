@@ -6,6 +6,30 @@
 
 ## 📋 标准学习流程
 
+### 自动触发规则（用户已确认）
+
+**当用户说"完成第X章学习"时，自动执行以下操作（无需二次确认）**：
+
+```
+用户说"完成/学完/结束第X章"
+↓
+自动执行：
+1. 检查是否有未推送的前序章节（如 Chapter 5 未完成则先推送）
+2. 生成本章 NOTES.md
+   - 核心收获
+   - Bug修复记录
+   - 代码对齐差异
+   - 深度思考
+3. Git提交并推送
+   - git add chapterX/
+   - git commit -m "完成第X章: 标题"
+   - git checkout -b chapterX (如果不存在)
+   - git push origin chapterX
+   - git checkout main
+   - git merge chapterX
+4. 报告完成状态，进入下一章准备
+```
+
 ### 每章学习步骤
 
 ```
@@ -22,16 +46,7 @@
    ↓
 4. 用户说"完成/学完/结束第X章"
    ↓
-5. 我生成:
-   - chapterX/NOTES.md   (学习笔记，记录思考、问题、扩展)
-   ↓
-6. 推送到GitHub:
-   - git add chapterX/
-   - git commit -m "完成第X章"
-   - git push origin main
-   ↓
-7. 进入下一章
-```
+   【触发自动流程，见上文】
 
 ---
 
