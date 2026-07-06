@@ -1,6 +1,6 @@
 # 第八章学习笔记：记忆与检索
 
-> 完成时间：2026-06-04
+> 完成时间：2026-07-06
 > 章节目标：理解并实践 Memory 系统和 RAG 检索增强生成
 
 ---
@@ -90,28 +90,65 @@ if result.get("success", False):  # AttributeError: 'str' object has no attribut
 
 **解决**：需要适配实际返回值格式，或者使用 try-except 处理。
 
-#### 问题2：Embedding 和 PDF 处理非常慢
+### 3.2 新电脑环境迁移问题（2026-07-05 ~ 07-06）
 
-**现象**：首次运行 PDF 加载超时(120秒不够)
+本次会话解决了从旧电脑迁移到新电脑后的整套环境问题：
 
-**原因**：
-- 大 PDF 分块后生成 embedding 需要时间
-- 每个 chunk 都要经过 sentence-transformers 模型
-- Qdrant upsert 需要网络传输
+#### 问题1：qdrant-client 版本不兼容
 
-**解决**：这不是 bug，是正常工程代价。实际应用需要：
-- 异步处理
-- 批量 embedding
-- 预计算和缓存
-- 更长的超时时间
+**现象**：`'QdrantClient' object has no attribute 'search'`
 
-#### 问题3：API 文档和实际代码不一致
+**原因**：`hello-agents==0.2.0` 调用 `client.search()` 方法，但 qdrant-client 1.17+/1.18+ 已移除该方法，改用 `query_points()`。
 
-**现象**：教程中的 API 调用方式在实际 `hello_agents==0.2.0` 中不完全匹配
+**解决**：降级到 `qdrant-client==1.11.0`，同时保留 `query_points` 方法，双方法兼容。
 
-**原因**：框架版本更新，或者教程代码是示例而非实际实现
+#### 问题2：HuggingFace 模型下载失败
 
-**解决**：需要阅读实际源码确认参数和返回值
+**现象**：`hf-mirror.com` 返回 308 跳转，huggingface_hub 元数据校验失败。
+
+**原因**：镜像站对 `/resolve/` 请求返回 308 跳回 huggingface.co，不兼容 huggingface_hub 客户端。
+
+**解决**：移除 `.env` 中 `HF_ENDPOINT=https://hf-mirror.com`，保留 `HF_HOME=D:\HF`，通过 Clash 代理从 HuggingFace 官网直接下载。模型已完整缓存到 `D:\HF\hub\models--sentence-transformers--all-MiniLM-L6-v2`（87MB）。
+
+#### 问题3：PyTorch GPU 安装
+
+**现象**：从 `llm2vec` 环境（Python 3.10 + torch 2.7.0+cu128）复制 torch 包后报 `WinError 126`。
+
+**原因**：Python 3.10 和 3.11 的 CPython ABI 不兼容，二进制包不能跨版本复制。
+
+**解决**：恢复原 torch 备份，用 pip 安装对应 Python 3.11 的版本：`pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128`。最终安装 `torch==2.11.0+cu128`，`torch.cuda.is_available() = True`。
+
+#### 问题4：GPU Embedding 加速
+
+**现象**：默认走 CPU 编码，RTX 5070 显卡闲置。
+
+**解决**：在 `fast_assistant.py` 中新增 `configure_gpu_embedder()` 函数，monkey-patch `LocalTransformerEmbedding` 类，将模型加载到 `cuda:0`，batch_size 提升到 128。验证：`model device: cuda:0`，显存占用 95.8MB，128 x 384 编码成功。
+
+**原则**：不修改 `hello_agents` 包源码（site-packages），所有优化在项目代码里实现。
+
+#### 问题5：PDF 处理 MissingDependencyException
+
+**现象**：`PdfConverter threw MissingDependencyException: dependencies needed to read .pdf files have not been installed`
+
+**原因**：MarkItDown 未安装 PDF 插件。
+
+**解决**：`pip install "markitdown[pdf]"`，安装后 PDF 提取正常工作。
+
+#### 问题6：RAGTool 返回值类型不匹配
+
+**现象**：`AttributeError: 'str' object has no attribute 'get'`
+
+**原因**：`RAGTool._add_document()` 返回字符串（如 `"✅ 文档已添加到知识库: ..."`），但 `fast_assistant.py` 用 `.get("success", False)` 把它当字典处理。
+
+**解决**：改为检查字符串是否包含 `"✅"` 判断成功，用正则从 `"📊 分块数量: 94"` 提取 chunk 数。
+
+#### 问题7：Neo4j 连接不稳定（已忽略）
+
+**现象**：退出时报 `Failed to read from defunct connection` 和 `Unable to retrieve routing information`。
+
+**原因**：Clash fake-ip（`198.18.x.x`）导致 Neo4j Bolt 连接（7687端口）长时间空闲后断开。
+
+**处理**：不影响核心功能（PDF 入库、RAG 检索、Qdrant 向量搜索都正常），退出时的统计查询可忽略。
 
 ---
 
@@ -261,9 +298,13 @@ if result.get("success", False):  # AttributeError: 'str' object has no attribut
 
 ### 7.1 关键文件
 
-- `chapter08/code/fast_assistant.py` - 文档问答助手实现
+- `chapter08/code/fast_assistant.py` - 文档问答助手实现（含 GPU embedding monkey-patch）
+- `chapter08/code/test_env.py` - HF 模型加载验证
+- `chapter08/code/fast_memory.py` - 最小记忆测试
+- `chapter08/code/fast_rag.py` - 最小 RAG 入库测试
 - `chapter08/README.md` - 章节学习指南
-- `.env` - 环境配置(包含 API 密钥，不上传)
+- `.env` - 环境配置（含 API 密钥，不上传）
+- `README.md` - 项目级 README，含环境配置与常见坑点
 
 ### 7.2 不上传的文件
 
@@ -273,17 +314,23 @@ memory_data/                  # SQLite 数据
 knowledge_base/               # RAG 数据
 learning_report_*.json        # 学习报告
 __pycache__/                  # Python 缓存
+D:\HF\hub\                    # 本地模型缓存（11GB+）
 ```
 
 ### 7.3 运行命令
 
 ```bash
-# 运行文档问答助手
-D:/anaconda3/envs/agent_study/python chapter08/code/fast_assistant.py
-
-# 环境要求
+# 激活环境
 conda activate agent_study
-pip install hello-agents
+
+# 运行文档问答助手
+python chapter08/code/fast_assistant.py
+
+# 环境版本
+# qdrant-client==1.11.0（降级兼容 hello-agents）
+# torch==2.11.0+cu128（RTX 5070 GPU 加速）
+# hello-agents==0.2.0
+# markitdown[pdf]（含 PDF 插件）
 ```
 
 ---

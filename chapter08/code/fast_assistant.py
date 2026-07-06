@@ -38,6 +38,67 @@ except ImportError as e:
             raise RuntimeError("RAGTool需要hello_agents包。请运行: pip install hello-agents")
 
 
+def configure_gpu_embedder():
+    """在不修改 hello_agents 源码的前提下，让本地 embedding 自动走 GPU 并加大 batch。
+    
+    原理：hello_agents 的 embedding 单例是在第一次调用 get_text_embedder() 时才创建的。
+    我们在 MemoryTool/RAGTool 初始化之前，patch 掉 LocalTransformerEmbedding 类的
+    _load_backend 和 encode 方法，后续创建的 embedder 实例就会自动使用 GPU。
+    """
+    if not HAS_HELLO_AGENTS:
+        return
+
+    import torch
+    from hello_agents.memory.embedding import (
+        LocalTransformerEmbedding,
+        get_text_embedder,
+        _embedder,
+    )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    embed_batch_size = int(os.environ.get("EMBED_BATCH_SIZE", "128"))
+
+    print(f"[GPU配置] embedding 设备: {device}, batch_size: {embed_batch_size}")
+
+    _orig_load = LocalTransformerEmbedding._load_backend
+
+    def _patched_load_backend(self):
+        _orig_load(self)
+        if hasattr(self, "_st_model") and self._st_model is not None:
+            self._st_model = self._st_model.to(device)
+
+    LocalTransformerEmbedding._load_backend = _patched_load_backend
+
+    _orig_encode = LocalTransformerEmbedding.encode
+
+    def _patched_encode(self, texts):
+        import numpy as np
+
+        if isinstance(texts, str):
+            inputs = [texts]
+            single = True
+        else:
+            inputs = list(texts)
+            single = False
+
+        if self._backend == "st":
+            vecs = self._st_model.encode(inputs, batch_size=embed_batch_size, show_progress_bar=False)
+            if hasattr(vecs, "tolist"):
+                vecs = [v for v in vecs]
+        else:
+            vecs = _orig_encode(self, texts)
+
+        if single:
+            return vecs[0]
+        return vecs
+
+    LocalTransformerEmbedding.encode = _patched_encode
+
+
+# 应用 GPU 配置（必须在 MemoryTool/RAGTool 初始化之前）
+configure_gpu_embedder()
+
+
 class PDFLearningAssistant:
     """智能文档问答助手 - 结合记忆系统和RAG检索"""
 
@@ -109,14 +170,20 @@ class PDFLearningAssistant:
         
         process_time = time.time() - start_time
         
-        if result.get("success", False):
+        # RAGTool._add_document() 返回字符串而非字典，按内容判断成功/失败
+        if isinstance(result, str) and "✅" in result:
             self.current_document = os.path.basename(pdf_path)
             self.stats["documents_loaded"] += 1
+            
+            # 从返回文本中提取分块数量（格式: "📊 分块数量: 94"）
+            import re
+            chunk_match = re.search(r"分块数量[：:]\s*(\d+)", result)
+            chunk_count = int(chunk_match.group(1)) if chunk_match else 0
             
             # 【MemoryTool】记录学习事件到情景记忆
             self.memory_tool.execute(
                 "add",
-                content=f"加载了文档《{self.current_document}》，包含 {result.get('chunk_count', '?')} 个知识片段",
+                content=f"加载了文档《{self.current_document}》，包含 {chunk_count} 个知识片段",
                 memory_type="episodic",
                 importance=0.9,
                 event_type="document_loaded",
@@ -125,14 +192,14 @@ class PDFLearningAssistant:
             
             return {
                 "success": True,
-                "message": f"加载成功！提取了 {result.get('chunk_count', '?')} 个知识片段(耗时: {process_time:.1f}秒)",
+                "message": f"加载成功！提取了 {chunk_count} 个知识片段(耗时: {process_time:.1f}秒)",
                 "document": self.current_document,
-                "chunks": result.get('chunk_count', 0)
+                "chunks": chunk_count
             }
         else:
             return {
                 "success": False,
-                "message": f"加载失败: {result.get('error', '未知错误')}"
+                "message": f"加载失败: {result}"
             }
 
     def ask(self, question: str, use_advanced_search: bool = True) -> str:
