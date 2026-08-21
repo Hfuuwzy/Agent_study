@@ -205,6 +205,61 @@ TAVILY_API_KEY=...
 - 如果缺依赖，只提供安装指令，等待用户确认或用户自行安装。
 - 只有用户明确说“安装/执行安装命令”时，才可以执行安装。
 
+### 6.1 Chapter 9 起的新框架环境基线（2026-07-06）
+
+用户已明确：从 Chapter 9 开始，学习优先按 Hello-Agents 新文档和新框架要求推进；旧章节兼容性不再作为环境约束。若旧章节代码需要回看，可另建环境或按需恢复依赖。
+
+当前 `agent_study` conda 环境已切换到 **hello-agents 0.2.8 / 新章节优先**：
+
+```bash
+hello-agents==0.2.8
+websockets==15.0.1
+Pillow==12.3.0
+protobuf==6.33.6
+astor==0.8.1
+docstring-parser==0.17.0
+psutil==5.9.8
+pydantic==2.12.0
+tiktoken==0.12.0
+```
+
+为消除依赖冲突，已移除旧冲突源：
+
+```bash
+gradio
+gradio-client
+autogen-core
+autogen-agentchat
+autogen-ext
+```
+
+已验证：
+
+```bash
+D:\Anaconda\envs\agent_study\python.exe -m pip check
+# No broken requirements found.
+
+D:\Anaconda\envs\agent_study\python.exe -c "import hello_agents, camel, langgraph_sdk, langsmith, pdfplumber, PIL, websockets, google.protobuf, pydantic, tiktoken, qdrant_client, mcp, fastmcp; print('OK')"
+```
+
+注意：`fastmcp` 可能出现 `authlib.jose` deprecation warning，这是弃用提示，不是依赖错误。
+
+如果未来需要恢复 AutoGen，可不要直接无脑 `pip install autogen-*`。先使用以下兼容组合并重新验证：
+
+```bash
+D:\Anaconda\envs\agent_study\python.exe -m pip install \
+  "autogen-core==0.7.5" \
+  "autogen-agentchat==0.7.5" \
+  "autogen-ext==0.7.5" \
+  "protobuf==5.29.6" \
+  "grpcio-tools>=1.41,<1.72" \
+  "tensorboard<2.21"
+
+D:\Anaconda\envs\agent_study\python.exe -m pip check
+```
+
+如果只为回看 Chapter 6 的 AutoGen 示例，推荐新建独立环境，例如 `agent_study_autogen`，避免再次污染 Chapter 9+ 的学习环境。
+
 ---
 
 ## 7. 章节进度
@@ -218,9 +273,10 @@ TAVILY_API_KEY=...
 | 05 | 低代码平台 | ✅ | 无代码 | ✅ | ✅ | ✅ PR 已合并 |
 | 06 | 框架开发实践 | ✅ | ✅ | ✅ | ✅ | ✅ PR 已合并 |
 | 07 | 构建你的 Agent 框架 | ✅ | ✅ | ✅ | ✅ | ✅ PR 已合并 |
-| 08 | 记忆与检索 | ✅ | ✅ | ✅ | ✅ | ⏳ 待推送 |
+| 08 | 记忆与检索 | ✅ | ✅ | ✅ | ✅ | ✅ PR 已合并 |
+| 09 | 上下文工程 | ✅ | ✅ | ✅ | ✅ | ✅ 已推送 |
 
-当前状态：Chapter 8 学习完成，准备推送。下一章（Chapter 9）待学习。
+当前状态：Chapter 9 学习完成，NOTES.md 已生成，chapter9 分支已推送，等待用户在 GitHub 创建并合并 PR。下一章：Chapter 10 智能体通信协议。
 
 ---
 
@@ -316,6 +372,51 @@ TAVILY_API_KEY=...
 3. 所有操作都要经过思考：先理解章节架构意图，再提取片段，再最小环境适配。
 4. 适配只能解决真实 API 差异，不能变成自创实现；例如安装包 `Tool.run(...) -> str`，就按 `str` 返回适配，而不是引入不存在的 `ToolResponse`。
 
+### 8.8 hello_agents 0.2.8 load_dotenv() 时序问题（2026-07-06）
+
+问题：Chapter 9 的 `ContextBuilder_test.py` 创建 `MemoryTool` 时崩溃，报 `Qdrant连接失败: localhost:6331 拒绝连接`。
+
+根因：`hello_agents 0.2.8` 的 `core/database_config.py` 在模块加载时调用了 `load_dotenv()` 并初始化 `db_config = DatabaseConfig.from_env()`。如果用户脚本的 `load_dotenv()` 放在 `import hello_agents` 之后，框架内部的 `load_dotenv()` 先执行（从 site-packages 目录找 .env，找不到），`db_config` 以空配置初始化。之后用户脚本的 `load_dotenv()` 虽然加载了 .env，但 `db_config` 已经固化，不会重新读取。导致 `QDRANT_URL` / `QDRANT_API_KEY` 为空 → fallback 到 `localhost:6333` → 崩溃。
+
+**修复：所有使用 `hello_agents` 的脚本，`load_dotenv()` 必须放在所有 import 之前。**
+
+```python
+# ✅ 正确
+from dotenv import load_dotenv
+load_dotenv()
+
+from hello_agents.tools import MemoryTool
+from hello_agents.context import ContextBuilder
+# ...
+
+# ❌ 错误
+from hello_agents.tools import MemoryTool
+from dotenv import load_dotenv
+load_dotenv()  # 太晚，框架已经用空配置初始化了
+```
+
+**为什么 Chapter 8 的 demo_combined.py 没问题：** 它的 import 顺序恰好是 `load_dotenv()` 在前，`hello_agents` 在后。
+
+**注意：** Qdrant 云连接还受代理节点影响，端口 6333 的 SSL 握手可能失败。如遇 `[SSL: UNEXPECTED_EOF_WHILE_READING]`，检查代理节点配置。
+
+### 8.9 Chapter 9 中文相关性评分与 GBK 编码问题（2026-08-21）
+
+**问题 1：中文记忆/RAG 结果被 Select 阶段全过滤。**
+
+根因：`hello_agents` ContextBuilder 的 `_select()` 用 `content.lower().split()` 做关键词重叠评分。中文没有空格，整句会被切成一个 token，与查询词的交集≈0，relevance_score≈0，低于默认 `min_relevance=0.3` 全部被过滤。
+
+修复：`ContextConfig(min_relevance=0.0)` 绕过过滤。这是绕过不是修复，生产化应换 embedding 相似度。
+
+**关键教训：同一坑要处处修。** 用户在 `ContextBuilder_test.py` 下半部分新增 `ContextAwareAgent` 时，其内部 `ContextBuilder(config=ContextConfig(max_tokens=4000))` 漏掉了 `min_relevance=0.0`，需要同步补上。修改配置类代码时，必须检查所有实例化点。
+
+**问题 2：Windows GBK 编码崩溃。**
+
+现象：`RAGTool.__init__` 抛 `UnicodeEncodeError: 'gbk' codec can't encode character '\u2705'`。
+
+根因：框架用 `print("✅ ...")` 输出日志，Windows 控制台默认 GBK 编不了 emoji；且异常处理分支里 `print("❌ ...")` 会再次抛同样异常，掩盖原始错误。
+
+修复：运行前 `$env:PYTHONIOENCODING="utf-8"`。所有跑 hello_agents 的 PowerShell 会话都建议设置。
+
 ---
 
-**最后更新**：2026-07-06
+**最后更新**：2026-08-21
