@@ -286,9 +286,9 @@ D:\Anaconda\envs\agent_study\python.exe -m pip check
 | 07 | 构建你的 Agent 框架 | ✅ | ✅ | ✅ | ✅ | ✅ PR 已合并 |
 | 08 | 记忆与检索 | ✅ | ✅ | ✅ | ✅ | ✅ PR 已合并 |
 | 09 | 上下文工程 | ✅ | ✅ | ✅ | ✅ | ✅ 已推送 |
-| 10 | 智能体通信协议 | ✅ | ✅ | ✅ | ✅ | ⏳ chapter10 分支待推送 |
+| 10 | 智能体通信协议 | ✅ | ✅ | ✅ | ✅ | ✅ 已推送 |
 
-当前状态：Chapter 10 学习完成，NOTES.md 已生成，当前正在完成 chapter10 分支的验证与推送。
+当前状态：Chapter 10 学习完成，NOTES.md 已生成，chapter10 分支已推送，等待用户在 GitHub 创建并合并 PR。
 
 ---
 
