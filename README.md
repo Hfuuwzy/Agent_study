@@ -32,8 +32,9 @@ conda activate agent_study
 ### 2. 核心依赖安装
 
 ```bash
-# 安装 Hello-Agents 框架（包含所有依赖）
-pip install "hello-agents[all]==0.2.0"
+# 安装 Hello-Agents 框架
+# 版本事实：当前环境 0.2.2；第九章历史基线 0.2.8；第十一章教程要求 [rl]==0.2.5（升级需用户授权）
+pip install "hello-agents[all]==0.2.2"
 
 # 安装 spaCy 中文/英文模型
 python -m spacy download zh_core_web_sm
@@ -190,6 +191,9 @@ WARNING: TF-IDF模型未训练，请先调用fit()方法
 | [第六章](chapter06/) | 框架开发实践 | 三步问答助手、工具系统、Agent核心循环 | ✅ 已完成 |
 | [第七章](chapter07/) | 构建Agent框架 | SimpleAgent、ToolRegistry、ReActAgent完整实现 | ✅ 已完成 |
 | [第八章](chapter08/) | 记忆与检索 | 四种记忆类型、RAG系统、向量数据库、知识图谱 | ✅ 已完成 |
+| [第九章](chapter09/) | 上下文工程 | GSSC流水线、ContextBuilder、长时程代码助手 | ✅ 已完成 |
+| [第十章](chapter10/) | 智能体通信协议 | MCP、A2A、ANP 三大协议实践、天气 MCP 服务 | ✅ 已完成 |
+| [第十一章](chapter11/) | Agentic-RL | 智能体强化学习：SFT/GRPO/LoRA 训练流水线 | 🔄 学习中 |
 
 ---
 
@@ -308,7 +312,7 @@ WARNING: TF-IDF模型未训练，请先调用fit()方法
 
 ---
 
-### 第八章：记忆与检索 🔄 学习中
+### 第八章：记忆与检索
 **核心概念：**
 - **四种记忆类型：**
   - 工作记忆（WorkingMemory）：临时对话上下文
@@ -338,19 +342,56 @@ WARNING: TF-IDF模型未训练，请先调用fit()方法
 - `chapter08/code/fast_assistant.py` - 完整助手
 - `chapter08/code/test.py` / `demo_combined.py` - 综合演示
 
-**当前进展：**
-- ✅ Qdrant 向量数据库连接成功
-- ✅ Neo4j 图数据库连接成功
-- ✅ sentence-transformers 模型下载完成
-- ✅ spaCy 中英文模型加载成功
-- ⚠️ qdrant-client 版本降级到 1.11.0 以兼容 hello-agents
-- 🔄 正在测试记忆搜索与 RAG 检索功能
+**完成情况（2026-07-06 合并，PR #5）：**
+- 记忆系统四种类型全部跑通；PDF 入库 + GPU 加速 + RAG 检索全流程验证
+- qdrant-client 固定 1.11.0 兼容 hello-agents；详见 `chapter08/NOTES.md`
+
+---
+
+### 第九章：上下文工程
+**核心概念：**
+- GSSC 流水线：Gather → Select → Compress → Isolate
+- ContextBuilder：多源上下文组装与相关性筛选
+- 中文场景适配：`min_relevance=0.0` 绕过空格分词缺陷
+
+**实践内容：**
+- ContextBuilder 组装、NoteTool / TerminalTool 工具演示
+- 长时程代码助手（code_assistant.py）全流程跑通
+
+**关键代码：** `chapter09/code/code_assistant.py`
+
+---
+
+### 第十章：智能体通信协议
+**核心概念：**
+- MCP：模型上下文协议（stdio/SSE 传输、GitHub MCP 集成）
+- A2A：Agent 间通信协议（客户端/服务端/多 Agent 网络）
+- ANP：Agent 网络协议（服务发现、任务分发、负载均衡）
+
+**实践内容：**
+- 自定义 MCP 服务与天气 MCP 服务部署
+- GitHub MCP 实际运行验证（26 个工具发现）
+- A2A / ANP 全系列示例
+
+**关键代码：** `chapter10/code/03_GitHubMCP.py`、`chapter10/code/09_A2A_Network.py`
+
+---
+
+### 第十一章：Agentic-RL（智能体强化学习）🔄 学习中
+**核心概念：**
+- 智能体强化学习：SFT 监督微调、GRPO 强化学习
+- LoRA 配置、奖励函数设计、分布式训练、模型评估
+
+**当前进展（2026-08-25）：**
+- ✅ README + 教程代码就位（00_quick_test 到 08_distributed_training 共 9 个脚本）
+- ⚠️ 教程要求 `hello-agents[rl]==0.2.5`，当前环境 0.2.2 下 `RLTrainingTool` ImportError（升级需用户授权）
+- ⚠️ 本机 torch 为 CPU 版 + RTX 3060 6GB，完整训练不可行，以阅读为主、实验走云 GPU
 
 ---
 
 ## 🚀 快速开始
 
-### 运行环境测试
+### 运行环境测试（以第八章示例为参考，已验证可跑通）
 
 ```powershell
 # 激活环境
@@ -376,6 +417,8 @@ python chapter08/code/test.py
 python chapter08/code/demo_combined.py
 ```
 
+> 最新章节代码在对应 `chapterX/code/` 下；运行前注意 `load_dotenv()` 必须放在所有 `hello_agents` 导入之前（详见 `docs/ENVIRONMENT.md`）。
+
 ---
 
 ## 📁 项目结构
@@ -386,6 +429,9 @@ Agent_study/
 ├── .gitignore                    # Git 忽略规则
 ├── MEMORY.md                     # 项目流程记忆文档
 ├── README.md                     # 本文件
+├── docs/                         # 全局参考文档
+│   ├── ENVIRONMENT.md             # 环境配置与故障排查
+│   └── STUDY_WORKFLOW.md          # 学习与完成阶段工作流
 ├── chapter01/                    # 第一章：初识智能体
 │   ├── README.md
 │   ├── NOTES.md
@@ -418,9 +464,23 @@ Agent_study/
 │   ├── README.md
 │   ├── NOTES.md
 │   └── code/
+├── chapter09/                    # 第九章：上下文工程 ✅
+│   ├── README.md
+│   ├── NOTES.md
+│   ├── STUDY_READY.md
+│   └── code/
+├── chapter10/                    # 第十章：智能体通信协议 ✅
+│   ├── NOTES.md
+│   └── code/
+├── chapter11/                    # 第十一章：Agentic-RL 🔄 学习中
+│   ├── README.md
+│   └── code/
 ├── knowledge_base/               # RAG 知识库目录
 ├── memory_data/                  # 记忆数据存储
-└── notes/                        # 学习笔记附件
+├── notes/                        # 学习笔记附件
+├── note.md                       # 自由笔记（随手记）
+├── report.md                     # AI Agent 框架调研报告
+└── AI agent.md                   # 个人学习规划与随想
 ```
 
 ---
@@ -429,6 +489,8 @@ Agent_study/
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-08-25 | 第十章：智能体通信协议合并进 main（PR #7）；开始第十一章 Agentic-RL 学习准备（README+教程代码就位）；同步全项目文档状态 |
+| 2026-08-21 | 完成第九章：上下文工程，GSSC 流水线全流程跑通（PR #6 合并） |
 | 2026-07-06 | 完成第八章：记忆与检索，解决环境迁移全套问题，PDF入库+GPU加速+RAG检索全流程跑通 |
 | 2026-07-05 | 创建项目 README.md，记录环境配置与常见坑点 |
 | 2026-07-05 | 完成第八章环境配置，解决 qdrant-client 版本兼容问题 |
