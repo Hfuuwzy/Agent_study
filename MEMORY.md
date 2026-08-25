@@ -205,11 +205,11 @@ TAVILY_API_KEY=...
 - 如果缺依赖，只提供安装指令，等待用户确认或用户自行安装。
 - 只有用户明确说“安装/执行安装命令”时，才可以执行安装。
 
-### 6.1 Chapter 9 起的新框架环境基线（2026-07-06）
+### 6.1 Chapter 9 起的新框架环境记录（2026-07-06，2026-08-25 更新）
 
 用户已明确：从 Chapter 9 开始，学习优先按 Hello-Agents 新文档和新框架要求推进；旧章节兼容性不再作为环境约束。若旧章节代码需要回看，可另建环境或按需恢复依赖。
 
-当前 `agent_study` conda 环境已切换到 **hello-agents 0.2.8 / 新章节优先**：
+Chapter 9 当时的 `agent_study` conda 环境基线为 **hello-agents 0.2.8 / 新章节优先**：
 
 ```bash
 hello-agents==0.2.8
@@ -222,6 +222,17 @@ psutil==5.9.8
 pydantic==2.12.0
 tiktoken==0.12.0
 ```
+
+Chapter 10 在 2026-08-25 使用当前解释器重新核验，实际环境已变为：
+
+```bash
+hello-agents==0.2.2
+fastmcp==2.12.5
+mcp==1.16.0
+authlib==1.7.2
+```
+
+这两组版本分别是不同时间点的真实环境记录。后续排查兼容问题时必须先核对当前解释器中的实际版本，不能把 Chapter 9 的 `0.2.8` 历史基线直接套用到新章节，也不要未经用户授权主动升级或降级。
 
 为消除依赖冲突，已移除旧冲突源：
 
@@ -275,8 +286,9 @@ D:\Anaconda\envs\agent_study\python.exe -m pip check
 | 07 | 构建你的 Agent 框架 | ✅ | ✅ | ✅ | ✅ | ✅ PR 已合并 |
 | 08 | 记忆与检索 | ✅ | ✅ | ✅ | ✅ | ✅ PR 已合并 |
 | 09 | 上下文工程 | ✅ | ✅ | ✅ | ✅ | ✅ 已推送 |
+| 10 | 智能体通信协议 | ✅ | ✅ | ✅ | ✅ | ⏳ chapter10 分支待推送 |
 
-当前状态：Chapter 9 学习完成，NOTES.md 已生成，chapter9 分支已推送，等待用户在 GitHub 创建并合并 PR。下一章：Chapter 10 智能体通信协议。
+当前状态：Chapter 10 学习完成，NOTES.md 已生成，当前正在完成 chapter10 分支的验证与推送。
 
 ---
 
@@ -417,6 +429,15 @@ load_dotenv()  # 太晚，框架已经用空配置初始化了
 
 修复：运行前 `$env:PYTHONIOENCODING="utf-8"`。所有跑 hello_agents 的 PowerShell 会话都建议设置。
 
+### 8.10 Chapter 10 MCP 运行验证与凭据安全（2026-08-25）
+
+1. `03_GitHubMCP.py` 已完成实际运行验证：成功发现 26 个 GitHub 工具，并返回有效的仓库搜索结果。
+2. 程序退出时出现 `unclosed transport` / `Event loop is closed` 告警，但业务结果已完成，且检查时没有残留 `server-github` Node 进程。本次判定为非致命的 asyncio 子进程回收告警；若后续出现进程残留或结果不完整，再排查客户端关闭时序。
+3. 其余 Chapter 10 示例只完成代码阅读与 AST 静态验证，不能把静态检查写成运行时验证。当前 23 个 Python 文件全部通过 AST 解析。
+4. `03_GitHubMCP.py` 的 docstring 曾含真实 GitHub Token，已替换为 `your_token_here`。源码清理不能使已暴露凭据重新安全，用户仍需在 GitHub 撤销或轮换该 Token。
+5. 凭据只允许通过环境变量或未纳入版本控制的 `.env` 提供，禁止写入源码、注释、docstring、README、NOTES 或提交消息。
+6. `load_dotenv()` 继续沿用 Chapter 9 的时序规则：必须放在所有 `hello_agents` 导入之前。本章已在 `03_GitHubMCP.py` 和 `09_A2A_WithAgent.py` 中完成该适配。
+
 ---
 
-**最后更新**：2026-08-21
+**最后更新**：2026-08-25
