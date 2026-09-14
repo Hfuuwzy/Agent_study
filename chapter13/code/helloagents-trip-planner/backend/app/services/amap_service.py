@@ -1,58 +1,48 @@
-"""高德地图MCP服务封装"""
+"""高德地图MCP服务封装：工具与 AmapService 均改为依赖注入构造，无进程级单例。"""
 
 from typing import List, Dict, Any, Optional
+from .. import config as _config  # noqa: F401  # 保证 load_dotenv() 先于 hello_agents 导入
+from ..config import Settings, get_settings
 from hello_agents.tools import MCPTool
-from ..config import get_settings
 from ..models.schemas import Location, POIInfo, WeatherInfo
 
-# 全局MCP工具实例
-_amap_mcp_tool = None
 
+def create_amap_mcp_tool(settings: Optional[Settings] = None) -> MCPTool:
+    """构造高德地图 MCP 工具（未配置 Key 时抛 ValueError，由运行时按需校验）。"""
+    s = settings if settings is not None else get_settings()
 
-def get_amap_mcp_tool() -> MCPTool:
-    """
-    获取高德地图MCP工具实例(单例模式)
-    
-    Returns:
-        MCPTool实例
-    """
-    global _amap_mcp_tool
-    
-    if _amap_mcp_tool is None:
-        settings = get_settings()
-        
-        if not settings.amap_api_key:
-            raise ValueError("高德地图API Key未配置,请在.env文件中设置AMAP_API_KEY")
-        
-        # 创建MCP工具
-        _amap_mcp_tool = MCPTool(
-            name="amap",
-            description="高德地图服务,支持POI搜索、路线规划、天气查询等功能",
-            server_command=["uvx", "amap-mcp-server"],
-            env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-            auto_expand=True  # 自动展开为独立工具
-        )
-        
-        print(f"✅ 高德地图MCP工具初始化成功")
-        print(f"   工具数量: {len(_amap_mcp_tool._available_tools)}")
-        
-        # 打印可用工具列表
-        if _amap_mcp_tool._available_tools:
-            print("   可用工具:")
-            for tool in _amap_mcp_tool._available_tools[:5]:  # 只打印前5个
-                print(f"     - {tool.get('name', 'unknown')}")
-            if len(_amap_mcp_tool._available_tools) > 5:
-                print(f"     ... 还有 {len(_amap_mcp_tool._available_tools) - 5} 个工具")
-    
-    return _amap_mcp_tool
+    if not s.amap_api_key:
+        raise ValueError("高德地图API Key未配置,请在.env文件中设置AMAP_API_KEY")
+
+    # 创建MCP工具
+    tool = MCPTool(
+        name="amap",
+        description="高德地图服务,支持POI搜索、路线规划、天气查询等功能",
+        server_command=["uvx", "amap-mcp-server"],
+        env={"AMAP_MAPS_API_KEY": s.amap_api_key},
+        auto_expand=True  # 自动展开为独立工具
+    )
+
+    print("✅ 高德地图MCP工具初始化成功")
+    print(f"   工具数量: {len(tool._available_tools)}")
+
+    # 打印可用工具列表
+    if tool._available_tools:
+        print("   可用工具:")
+        for t in tool._available_tools[:5]:  # 只打印前5个
+            print(f"     - {t.get('name', 'unknown')}")
+        if len(tool._available_tools) > 5:
+            print(f"     ... 还有 {len(tool._available_tools) - 5} 个工具")
+
+    return tool
 
 
 class AmapService:
     """高德地图服务封装类"""
-    
-    def __init__(self):
-        """初始化服务"""
-        self.mcp_tool = get_amap_mcp_tool()
+
+    def __init__(self, mcp_tool: MCPTool):
+        """初始化服务：MCP 工具由调用方注入（真实 MCPTool 或测试桩）。"""
+        self.mcp_tool = mcp_tool
     
     def search_poi(self, keywords: str, city: str, citylimit: bool = True) -> List[POIInfo]:
         """
@@ -252,18 +242,4 @@ class AmapService:
         except Exception as e:
             print(f"❌ 获取POI详情失败: {str(e)}")
             return {}
-
-
-# 创建全局服务实例
-_amap_service = None
-
-
-def get_amap_service() -> AmapService:
-    """获取高德地图服务实例(单例模式)"""
-    global _amap_service
-    
-    if _amap_service is None:
-        _amap_service = AmapService()
-    
-    return _amap_service
 

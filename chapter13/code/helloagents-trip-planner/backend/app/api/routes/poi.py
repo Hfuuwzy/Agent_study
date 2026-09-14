@@ -1,10 +1,9 @@
 """POI相关API路由"""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from ...services.amap_service import get_amap_service
-from ...services.unsplash_service import get_unsplash_service
+from ...runtime.factory import AppRuntime, get_app_runtime
 
 router = APIRouter(prefix="/poi", tags=["POI"])
 
@@ -22,7 +21,10 @@ class POIDetailResponse(BaseModel):
     summary="获取POI详情",
     description="根据POI ID获取详细信息,包括图片"
 )
-async def get_poi_detail(poi_id: str):
+async def get_poi_detail(
+    poi_id: str,
+    runtime: AppRuntime = Depends(get_app_runtime),
+):
     """
     获取POI详情
     
@@ -33,7 +35,7 @@ async def get_poi_detail(poi_id: str):
         POI详情响应
     """
     try:
-        amap_service = get_amap_service()
+        amap_service = runtime.factory.create_amap_service()
         
         # 调用高德地图POI详情API
         result = amap_service.get_poi_detail(poi_id)
@@ -57,7 +59,11 @@ async def get_poi_detail(poi_id: str):
     summary="搜索POI",
     description="根据关键词搜索POI"
 )
-async def search_poi(keywords: str, city: str = "北京"):
+async def search_poi(
+    keywords: str,
+    city: str = "北京",
+    runtime: AppRuntime = Depends(get_app_runtime),
+):
     """
     搜索POI
 
@@ -69,7 +75,7 @@ async def search_poi(keywords: str, city: str = "北京"):
         搜索结果
     """
     try:
-        amap_service = get_amap_service()
+        amap_service = runtime.factory.create_amap_service()
         result = amap_service.search_poi(keywords, city)
 
         return {
@@ -91,7 +97,10 @@ async def search_poi(keywords: str, city: str = "北京"):
     summary="获取景点图片",
     description="根据景点名称从Unsplash获取图片"
 )
-async def get_attraction_photo(name: str):
+async def get_attraction_photo(
+    name: str,
+    runtime: AppRuntime = Depends(get_app_runtime),
+):
     """
     获取景点图片
 
@@ -102,7 +111,7 @@ async def get_attraction_photo(name: str):
         图片URL
     """
     try:
-        unsplash_service = get_unsplash_service()
+        unsplash_service = runtime.factory.create_unsplash()
 
         # 搜索景点图片
         photo_url = unsplash_service.get_photo_url(f"{name} China landmark")
