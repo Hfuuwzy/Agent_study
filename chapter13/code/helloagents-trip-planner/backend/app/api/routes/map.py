@@ -1,6 +1,6 @@
 """地图服务API路由"""
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
 from ...models.schemas import (
     POISearchRequest,
@@ -9,7 +9,7 @@ from ...models.schemas import (
     RouteResponse,
     WeatherResponse
 )
-from ...services.amap_service import get_amap_service
+from ...runtime.factory import AppRuntime, get_app_runtime
 
 router = APIRouter(prefix="/map", tags=["地图服务"])
 
@@ -23,7 +23,8 @@ router = APIRouter(prefix="/map", tags=["地图服务"])
 async def search_poi(
     keywords: str = Query(..., description="搜索关键词", example="故宫"),
     city: str = Query(..., description="城市", example="北京"),
-    citylimit: bool = Query(True, description="是否限制在城市范围内")
+    citylimit: bool = Query(True, description="是否限制在城市范围内"),
+    runtime: AppRuntime = Depends(get_app_runtime),
 ):
     """
     搜索POI
@@ -38,7 +39,7 @@ async def search_poi(
     """
     try:
         # 获取服务实例
-        service = get_amap_service()
+        service = runtime.factory.create_amap_service()
         
         # 搜索POI
         pois = service.search_poi(keywords, city, citylimit)
@@ -64,11 +65,12 @@ async def search_poi(
     description="查询指定城市的天气信息"
 )
 async def get_weather(
-    city: str = Query(..., description="城市名称", example="北京")
+    city: str = Query(..., description="城市名称", example="北京"),
+    runtime: AppRuntime = Depends(get_app_runtime),
 ):
     """
     查询天气
-    
+        
     Args:
         city: 城市名称
         
@@ -77,7 +79,7 @@ async def get_weather(
     """
     try:
         # 获取服务实例
-        service = get_amap_service()
+        service = runtime.factory.create_amap_service()
         
         # 查询天气
         weather_info = service.get_weather(city)
@@ -102,7 +104,10 @@ async def get_weather(
     summary="规划路线",
     description="规划两点之间的路线"
 )
-async def plan_route(request: RouteRequest):
+async def plan_route(
+    request: RouteRequest,
+    runtime: AppRuntime = Depends(get_app_runtime),
+):
     """
     规划路线
     
@@ -114,7 +119,7 @@ async def plan_route(request: RouteRequest):
     """
     try:
         # 获取服务实例
-        service = get_amap_service()
+        service = runtime.factory.create_amap_service()
         
         # 规划路线
         route_info = service.plan_route(
@@ -144,16 +149,16 @@ async def plan_route(request: RouteRequest):
     summary="健康检查",
     description="检查地图服务是否正常"
 )
-async def health_check():
+async def health_check(runtime: AppRuntime = Depends(get_app_runtime)):
     """健康检查"""
     try:
         # 检查服务是否可用
-        service = get_amap_service()
+        service = runtime.factory.create_amap_service()
         
         return {
             "status": "healthy",
             "service": "map-service",
-            "mcp_tools_count": len(service.mcp_tool._available_tools)
+            "mcp_tools_count": len(getattr(service.mcp_tool, "_available_tools", []))
         }
     except Exception as e:
         raise HTTPException(

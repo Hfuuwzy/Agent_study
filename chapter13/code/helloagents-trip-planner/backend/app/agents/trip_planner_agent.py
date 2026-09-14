@@ -1,12 +1,10 @@
-"""多智能体旅行规划系统"""
+"""多智能体旅行规划系统（按 Run 构造：LLM 与高德工具由调用方注入，无进程级单例）。"""
 
 import json
-from typing import Dict, Any, List
+
+from .. import config as _config  # noqa: F401  # 保证 load_dotenv() 先于 hello_agents 导入
 from hello_agents import SimpleAgent
-from hello_agents.tools import MCPTool
-from ..services.llm_service import get_llm
 from ..models.schemas import TripRequest, TripPlan, DayPlan, Attraction, Meal, WeatherInfo, Location, Hotel
-from ..config import get_settings
 
 # ============ Agent提示词 ============
 
@@ -155,24 +153,21 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
 class MultiAgentTripPlanner:
     """多智能体旅行规划系统"""
 
-    def __init__(self):
-        """初始化多智能体系统"""
+    def __init__(self, llm, amap_tool):
+        """初始化多智能体系统：LLM 与高德 MCP 工具由调用方注入（真实实例或测试桩）。
+
+        Args:
+            llm: LLM 实例（须支持 invoke(messages) -> str，如 HelloAgentsLLM）
+            amap_tool: 高德 MCP 工具（须支持 add_tool 的 auto_expand 展开契约，如 MCPTool）
+        """
         print("🔄 开始初始化多智能体旅行规划系统...")
 
         try:
-            settings = get_settings()
-            self.llm = get_llm()
+            self.llm = llm
+            self.amap_tool = amap_tool
 
-            # 创建共享的MCP工具(只创建一次)
-            print("  - 创建共享MCP工具...")
-            self.amap_tool = MCPTool(
-                name="amap",
-                description="高德地图服务",
-                server_command=["uvx", "amap-mcp-server"],
-                env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-                auto_expand=True
-            )
-            self.amap_tool.expandable=True
+            # 共享MCP工具由调用方注入(底层只有一个MCP服务器进程)
+            print("  - 使用注入的共享MCP工具...")
 
             # 创建景点搜索Agent
             print("  - 创建景点搜索Agent...")
@@ -413,18 +408,4 @@ class MultiAgentTripPlanner:
             weather_info=[],
             overall_suggestions=f"这是为您规划的{request.city}{request.travel_days}日游行程,建议提前查看各景点的开放时间。"
         )
-
-
-# 全局多智能体系统实例
-_multi_agent_planner = None
-
-
-def get_trip_planner_agent() -> MultiAgentTripPlanner:
-    """获取多智能体旅行规划系统实例(单例模式)"""
-    global _multi_agent_planner
-
-    if _multi_agent_planner is None:
-        _multi_agent_planner = MultiAgentTripPlanner()
-
-    return _multi_agent_planner
 
