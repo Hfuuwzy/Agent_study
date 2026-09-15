@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from datetime import datetime, timedelta
 
 import app.config  # noqa: F401  # 保证 load_dotenv() 先于 hello_agents 导入
@@ -22,15 +23,18 @@ class StubLLM:
     provider = "stub"
     model = "stub-model"
 
-    def __init__(self, city="上海", start_date="2026-10-01", end_date="2026-10-03", travel_days=3):
+    def __init__(self, city="上海", start_date="2026-10-01", end_date="2026-10-03", travel_days=3, delay_per_invoke=0.0):
         self.city = city
         self.start_date = start_date
         self.end_date = end_date
         self.travel_days = travel_days
         self.calls = 0
+        self.delay_per_invoke = delay_per_invoke
 
     def invoke(self, messages, **kwargs):
         self.calls += 1
+        if self.delay_per_invoke:
+            time.sleep(self.delay_per_invoke)
         last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
         if "工具执行结果" in last_user:
             return "根据工具结果，已为您整理好相关信息。"

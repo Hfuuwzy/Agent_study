@@ -68,6 +68,10 @@ async def shutdown_event():
     print("\n" + "="*60)
     print("👋 应用正在关闭...")
     print("="*60 + "\n")
+    # 回收运行时持有的线程资源（SSE 专用执行器等），幂等
+    runtime = getattr(app.state, "app_runtime", None)
+    if runtime is not None:
+        runtime.close()
 
 
 @app.get("/")
