@@ -181,21 +181,26 @@
           </a-button>
         </a-form-item>
 
-        <!-- 加载进度条 -->
+        <!-- 真实运行进度：由 SSE step_started/tool_call/tool_result 事件驱动 -->
         <a-form-item v-if="loading">
           <div class="loading-container">
-            <a-progress
-              :percent="loadingProgress"
-              status="active"
-              :stroke-color="{
-                '0%': '#667eea',
-                '100%': '#764ba2',
-              }"
-              :stroke-width="10"
+            <a-steps direction="vertical" :current="currentStepIndex" :items="stepItems" />
+            <p v-if="toolActivity" class="loading-status">{{ toolActivity }}</p>
+            <p v-else class="loading-status">{{ loadingStatus }}</p>
+          </div>
+        </a-form-item>
+
+        <!-- 失败/降级告警：常驻显示（不随 loading 隐藏），用户可重试 -->
+        <a-form-item v-if="runError || runWarnings.length > 0">
+          <div class="loading-container">
+            <a-alert v-if="runError" type="error" show-icon :message="runError" />
+            <a-alert
+              v-for="warning in runWarnings"
+              :key="warning"
+              type="warning"
+              show-icon
+              :message="warning"
             />
-            <p class="loading-status">
-              {{ loadingStatus }}
-            </p>
           </div>
         </a-form-item>
       </a-form>
@@ -204,17 +209,49 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch } from 'vue'
+import { computed, ref, reactive, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { generateTripPlan } from '@/services/api'
-import type { TripFormData } from '@/types'
+import { generateTripPlan, subscribeRunEvents } from '@/services/api'
+import type { RunCompletedPayload, RunEvent, TripFormData } from '@/types'
 import type { Dayjs } from 'dayjs'
 
 const router = useRouter()
 const loading = ref(false)
-const loadingProgress = ref(0)
 const loadingStatus = ref('')
+const currentStep = ref<string | null>(null)
+const finishedSteps = ref<string[]>([])
+const toolActivity = ref('')
+const runError = ref('')
+const runWarnings = ref<string[]>([])
+let unsubscribeRun: (() => void) | null = null
+// 当前 run 的 id：只接受属于它的事件，旧订阅的迟到回调无法影响新 run
+let activeRunId: string | null = null
+
+// 编排四步（与后端 step_started 事件中的 step 键一一对应）
+const RUN_STEPS = [
+  { key: 'attractions', label: '搜索景点', icon: '🔍' },
+  { key: 'weather', label: '查询天气', icon: '🌤️' },
+  { key: 'hotels', label: '推荐酒店', icon: '🏨' },
+  { key: 'plan', label: '生成行程计划', icon: '📋' }
+]
+
+const currentStepIndex = computed(() => {
+  const index = RUN_STEPS.findIndex((step) => step.key === currentStep.value)
+  return index < 0 ? 0 : index
+})
+
+// 真实步骤状态驱动 a-steps：完成 / 进行中 / 等待
+const stepItems = computed(() =>
+  RUN_STEPS.map((step) => {
+    const isFinished = finishedSteps.value.includes(step.key)
+    const isCurrent = currentStep.value === step.key
+    return {
+      title: `${step.icon} ${step.label}`,
+      status: isFinished ? 'finish' : isCurrent ? 'process' : 'wait'
+    }
+  })
+)
 
 type TripFormState = Omit<TripFormData, 'start_date' | 'end_date'> & {
   start_date: Dayjs | null
@@ -248,6 +285,110 @@ watch([() => formData.start_date, () => formData.end_date], ([start, end]) => {
   }
 })
 
+const resetProgress = () => {
+  currentStep.value = null
+  finishedSteps.value = []
+  toolActivity.value = ''
+  runError.value = ''
+  runWarnings.value = []
+  activeRunId = null
+}
+
+const handleRunEvent = (event: RunEvent) => {
+  // 旧订阅的迟到回调不能影响新 run：只处理当前 run 的事件
+  if (activeRunId !== event.run_id) return
+  switch (event.type) {
+    case 'run_started':
+      loadingStatus.value = '运行已开始，正在执行多智能体编排...'
+      break
+    case 'step_started': {
+      const step = String(event.data.step || '')
+      const label = String(event.data.label || step)
+      const nextIndex = RUN_STEPS.findIndex((item) => item.key === step)
+      if (nextIndex < 0) break
+      const currentKey = currentStep.value
+      const currentIndex = currentKey ? RUN_STEPS.findIndex((item) => item.key === currentKey) : -1
+      // 重放幂等 + 单调前进：只接受严格晚于当前步骤的推进；重放/回退事件一律忽略，
+      // 既不把当前步骤误标为已完成，也不允许进度回退
+      if (nextIndex > currentIndex) {
+        if (currentKey && currentIndex >= 0 && !finishedSteps.value.includes(currentKey)) {
+          finishedSteps.value.push(currentKey)
+        }
+        currentStep.value = step
+        toolActivity.value = ''
+        loadingStatus.value = `正在${label}...`
+      }
+      break
+    }
+    case 'tool_call':
+      toolActivity.value = `🔧 正在调用 ${event.data.tool_name} 获取数据...`
+      break
+    case 'tool_result': {
+      const toolName = String(event.data.tool_name || '工具')
+      // 工具调用失败时后端在 data 里带 error 字段：如实显示失败，不打成功勾
+      toolActivity.value = event.data.error
+        ? `⚠️ ${toolName} 调用失败：${String(event.data.error)}`
+        : `✅ 已获取 ${toolName} 数据`
+      break
+    }
+    case 'validation_error':
+      toolActivity.value = `⚠️ ${event.data.message || '输出校验未通过'}`
+      break
+    case 'run_completed':
+      handleRunCompleted(event.data as unknown as RunCompletedPayload)
+      break
+  }
+}
+
+const handleRunCompleted = (data: RunCompletedPayload) => {
+  const warnings = data.warnings || []
+  runWarnings.value = warnings
+  loadingStatus.value = '运行已结束'
+  toolActivity.value = ''
+  // 终态：关闭 SSE 连接，避免 EventSource 自动重连（终态只会执行一次）
+  unsubscribeRun?.()
+  unsubscribeRun = null
+  activeRunId = null
+  if (data.status === 'success' || data.status === 'degraded') {
+    // 终态事件携带计划结果，直接落 sessionStorage 供结果页渲染
+    let storageError = ''
+    if (!data.result) {
+      storageError = '旅行计划生成完成，但未收到可展示的结果，请重试'
+    } else {
+      try {
+        sessionStorage.setItem('tripPlan', JSON.stringify(data.result))
+      } catch (error: unknown) {
+        storageError = error instanceof Error
+          ? `旅行计划已生成，但结果保存失败：${error.message}`
+          : '旅行计划已生成，但结果保存失败，请重试'
+      }
+    }
+    if (storageError) {
+      loading.value = false
+      runError.value = storageError
+      message.error(storageError)
+      return
+    }
+    if (data.status === 'success') {
+      message.success('旅行计划生成成功!')
+    } else {
+      message.warning(warnings.length > 0 ? `行程已降级生成：${warnings[0]}` : '行程已降级生成，部分数据可能缺失')
+    }
+    handleSuccess()
+  } else {
+    loading.value = false
+    runError.value = data.error || '运行失败，请稍后重试'
+    message.error(runError.value)
+  }
+}
+
+const handleSuccess = () => {
+  loading.value = false
+  setTimeout(() => {
+    router.push('/result')
+  }, 500)
+}
+
 const handleSubmit = async () => {
   if (!formData.start_date || !formData.end_date) {
     message.error('请选择日期')
@@ -255,26 +396,11 @@ const handleSubmit = async () => {
   }
 
   loading.value = true
-  loadingProgress.value = 0
-  loadingStatus.value = '正在初始化...'
-
-  // 模拟进度更新
-  const progressInterval = setInterval(() => {
-    if (loadingProgress.value < 90) {
-      loadingProgress.value += 10
-
-      // 更新状态文本
-      if (loadingProgress.value <= 30) {
-        loadingStatus.value = '🔍 正在搜索景点...'
-      } else if (loadingProgress.value <= 50) {
-        loadingStatus.value = '🌤️ 正在查询天气...'
-      } else if (loadingProgress.value <= 70) {
-        loadingStatus.value = '🏨 正在推荐酒店...'
-      } else {
-        loadingStatus.value = '📋 正在生成行程计划...'
-      }
-    }
-  }, 500)
+  // 关闭上一个 run 的订阅，旧回调不得残留到新 run
+  unsubscribeRun?.()
+  unsubscribeRun = null
+  resetProgress()
+  loadingStatus.value = '正在提交请求...'
 
   try {
     const requestData: TripFormData = {
@@ -288,34 +414,24 @@ const handleSubmit = async () => {
       free_text_input: formData.free_text_input
     }
 
-    const response = await generateTripPlan(requestData)
+    // 受理即回（202 + run_id），不再长等待
+    const acceptance = await generateTripPlan(requestData)
+    const acceptedRunId = acceptance.run_id
+    activeRunId = acceptedRunId
 
-    clearInterval(progressInterval)
-    loadingProgress.value = 100
-    loadingStatus.value = '✅ 完成!'
-
-    if (response.success && response.data) {
-      // 保存到sessionStorage
-      sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
-
-      message.success('旅行计划生成成功!')
-
-      // 短暂延迟后跳转
-      setTimeout(() => {
-        router.push('/result')
-      }, 500)
-    } else {
-      message.error(response.message || '生成失败')
-    }
-  } catch (error: any) {
-    clearInterval(progressInterval)
-    message.error(error.message || '生成旅行计划失败,请稍后重试')
-  } finally {
-    setTimeout(() => {
-      loading.value = false
-      loadingProgress.value = 0
-      loadingStatus.value = ''
-    }, 1000)
+    // 订阅 SSE 真实进度事件流；run_completed 后由 handleRunCompleted 关闭
+    unsubscribeRun = subscribeRunEvents(acceptedRunId, handleRunEvent, () => {
+      // 排队的 error 回调只影响其所属 run：旧订阅不得覆盖新 run 的连接状态
+      if (loading.value && activeRunId === acceptedRunId) {
+        loadingStatus.value = '进度连接中断，正在重连...'
+      }
+    })
+  } catch (error: unknown) {
+    unsubscribeRun?.()
+    unsubscribeRun = null
+    activeRunId = null
+    loading.value = false
+    message.error(error instanceof Error ? error.message : '受理旅行计划失败,请稍后重试')
   }
 }
 </script>
