@@ -47,13 +47,51 @@ class ToolFailureRecorder:
         return evidence
 
 
-class EventEmittingTool(Tool):
-    """包装单个工具的探针：run 前后分别发 tool_call 与 tool_result 事件。"""
+class ToolResultRecorder:
+    """记录工具成功返回的完整原始结果（按工具名保留最近一次），供中间结果类型化使用。
 
-    def __init__(self, inner: Tool, emit: EventSink) -> None:
+    与 :class:`ToolFailureRecorder` 同源：探针在工具执行成功后把完整结果交给录制器
+    （不截断），SSE 事件仍只携带 ``result_preview``。编排层在每步之后 drain() 取回
+    该步工具的实际返回——景点 / 酒店共用 ``amap_maps_text_search``，按步 drain 即可隔离。
+    录制器在 factory 里按 Run 创建，随 Run 生命周期隔离。
+    """
+
+    def __init__(self) -> None:
+        self._results: Dict[str, str] = {}
+
+    def record(self, tool_name: str, result: object) -> None:
+        """记录一次成功的工具返回（同名工具最新一次覆盖）。
+
+        Args:
+            tool_name: 展开工具名（如 ``amap_maps_text_search``）。
+            result: 工具 run() 的原始返回值（MCP 包装后为字符串）。
+        """
+        self._results[tool_name] = str(result)
+
+    def drain(self) -> Dict[str, str]:
+        """取出并清空已记录的工具结果（编排层按步调用）。"""
+        results = self._results
+        self._results = {}
+        return results
+
+
+class EventEmittingTool(Tool):
+    """包装单个工具的探针：run 前后分别发 tool_call 与 tool_result 事件。
+
+    ``result_capture`` 是独立的完整结果通道（供中间结果类型化），与 SSE 的
+    ``result_preview`` 事件载荷分离，避免大载荷污染事件流。
+    """
+
+    def __init__(
+        self,
+        inner: Tool,
+        emit: EventSink,
+        result_capture: Callable[[str, object], None] | None = None,
+    ) -> None:
         super().__init__(name=inner.name, description=inner.description)
         self._inner = inner
         self._emit = emit
+        self._result_capture = result_capture
 
     def run(self, parameters: Dict[str, Any]) -> str:
         self._emit("tool_call", {"tool_name": self.name, "parameters": dict(parameters or {})})
@@ -63,6 +101,8 @@ class EventEmittingTool(Tool):
             self._emit("tool_result", {"tool_name": self.name, "error": str(e)})
             raise
         self._emit("tool_result", {"tool_name": self.name, "result_preview": str(result)[:200]})
+        if self._result_capture is not None:
+            self._result_capture(self.name, result)
         return result
 
     def get_parameters(self):
@@ -75,17 +115,23 @@ class EventEmittingAmapTool(Tool):
     其余行为透传内层工具（如 AmapService 直接调用的 run 协议），不改变任何既有语义。
     """
 
-    def __init__(self, inner: Tool, emit: EventSink) -> None:
+    def __init__(
+        self,
+        inner: Tool,
+        emit: EventSink,
+        result_capture: Callable[[str, object], None] | None = None,
+    ) -> None:
         super().__init__(name=inner.name, description=inner.description)
         self._inner = inner
         self._emit = emit
+        self._result_capture = result_capture
         self.auto_expand = True
 
     def get_expanded_tools(self) -> List[Tool]:
         expander = getattr(self._inner, "get_expanded_tools", None)
         if expander is None:
             raise TypeError(f"工具 {self._inner.name} 不支持 auto_expand 展开")
-        return [EventEmittingTool(t, self._emit) for t in expander()]
+        return [EventEmittingTool(t, self._emit, self._result_capture) for t in expander()]
 
     def get_parameters(self):
         return self._inner.get_parameters()

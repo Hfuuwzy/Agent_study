@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.api.main import app
 from app.runtime.factory import AppRuntime, RuntimeFactory, get_app_runtime
-from tests.stubs import StubAmapTool, StubLLM, StubTool, StubUnsplash
+from tests.stubs import StubAmapTool, StubLLM, StubTool, StubUnsplash, TextSearchStub
 
 REQUEST = {
     "city": "上海", "start_date": "2026-10-01", "end_date": "2026-10-03",
@@ -94,12 +94,29 @@ class ExplicitDegradationHttpTest(unittest.TestCase):
         self.assertFalse(any(key in json.dumps(result) for key in ("longitude", "latitude")))
         self.assertFalse(any("请根据以下信息生成" in query for query in self.llm.recorded_queries))
 
-    def test_empty_search_response_is_degraded(self):
-        self.llm.tool_result_response = ""
+    def test_empty_tool_result_is_degraded(self):
+        """工具返回空 POI 列表 -> 类型化中间结果为空 -> 显式降级（评测集样例 3 语义）。"""
+        def empty_amap():
+            amap = StubAmapTool()
+            amap.tools["amap_maps_text_search"] = TextSearchStub(
+                attractions_text=json.dumps({"pois": []}, ensure_ascii=False),
+            )
+            return amap
+        self.runtime.close()
+        self.runtime = self._runtime(empty_amap, lambda: self.unsplash)
         run = self.client.post("/api/trip/plan", json=REQUEST).json()
         body = self._terminal(run["run_id"])
         self.assertEqual(body["status"], "degraded")
         self.assertTrue(body["warnings"])
+        self.assertFalse(any("请根据以下信息生成" in query for query in self.llm.recorded_queries))
+
+    def test_empty_agent_summary_with_valid_tool_result_is_success(self):
+        """工单 04 语义：Agent 自由文本总结为空不再导致降级——规划上下文只消费类型化结果。"""
+        self.llm.tool_result_response = ""
+        run = self.client.post("/api/trip/plan", json=REQUEST).json()
+        body = self._terminal(run["run_id"])
+        self.assertEqual(body["status"], "success")
+        self.assertEqual(body["warnings"], [])
 
     def test_final_parse_failure_is_failed_with_warnings_and_no_result(self):
         self.llm.plan_response = "不是 JSON"

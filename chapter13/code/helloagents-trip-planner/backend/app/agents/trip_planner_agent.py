@@ -1,159 +1,47 @@
-"""多智能体旅行规划系统（按 Run 构造：LLM 与高德工具由调用方注入，无进程级单例）。"""
+"""多智能体旅行规划系统（按 Run 构造：LLM 与高德工具由调用方注入，无进程级单例）。
+
+工单 04：三个搜索步骤的输出经 Pydantic schema 校验为类型化中间结果（见
+``models.intermediates``），规划提示词只基于类型化结果的白名单字段组装；用户自由
+文本与工具返回内容按不可信数据隔离（见 ``input_isolation``），注入指令不进入提示词。
+"""
 
 import json
+from typing import Callable, Protocol, Sequence, TypeVar, Union
+
+from pydantic import ValidationError
 
 from .. import config as _config  # noqa: F401  # 保证 load_dotenv() 先于 hello_agents 导入
 from hello_agents import SimpleAgent
+from ..models.intermediates import (
+    AttractionPOI,
+    AttractionResult,
+    HotelPOI,
+    HotelResult,
+    WeatherForecast,
+    WeatherResult,
+)
 from ..models.schemas import PlanningOutcome, TripRequest, TripPlan
+from .input_isolation import (
+    FIELD_LIMIT,
+    FREE_TEXT_LIMIT,
+    WEATHER_FIELD_LIMIT,
+    contains_directive,
+    sanitize_untrusted,
+)
+from .prompts import ATTRACTION_AGENT_PROMPT, HOTEL_AGENT_PROMPT, PLANNER_AGENT_PROMPT, WEATHER_AGENT_PROMPT
 
-# ============ Agent提示词 ============
+#: Agent 的 run 契约：接收用户输入文本，返回回答文本。
+class _AgentRunner(Protocol):
+    def run(self, input_text: str) -> str: ...
 
-ATTRACTION_AGENT_PROMPT = """你是景点搜索专家。你的任务是根据城市和用户偏好搜索合适的景点。
 
-**重要提示:**
-你必须使用工具来搜索景点!不要自己编造景点信息!
-
-**工具调用格式:**
-使用maps_text_search工具时,必须严格按照以下格式:
-`[TOOL_CALL:amap_maps_text_search:keywords=景点关键词,city=城市名]`
-
-**示例:**
-用户: "搜索北京的历史文化景点"
-你的回复: [TOOL_CALL:amap_maps_text_search:keywords=历史文化,city=北京]
-
-用户: "搜索上海的公园"
-你的回复: [TOOL_CALL:amap_maps_text_search:keywords=公园,city=上海]
-
-**注意:**
-1. 必须使用工具,不要直接回答
-2. 格式必须完全正确,包括方括号和冒号
-3. 参数用逗号分隔
-"""
-
-WEATHER_AGENT_PROMPT = """你是天气查询专家。你的任务是查询指定城市的天气信息。
-
-**重要提示:**
-你必须使用工具来查询天气!不要自己编造天气信息!
-
-**工具调用格式:**
-使用maps_weather工具时,必须严格按照以下格式:
-`[TOOL_CALL:amap_maps_weather:city=城市名]`
-
-**示例:**
-用户: "查询北京天气"
-你的回复: [TOOL_CALL:amap_maps_weather:city=北京]
-
-用户: "上海的天气怎么样"
-你的回复: [TOOL_CALL:amap_maps_weather:city=上海]
-
-**注意:**
-1. 必须使用工具,不要直接回答
-2. 格式必须完全正确,包括方括号和冒号
-"""
-
-HOTEL_AGENT_PROMPT = """你是酒店推荐专家。你的任务是根据城市和景点位置推荐合适的酒店。
-
-**重要提示:**
-你必须使用工具来搜索酒店!不要自己编造酒店信息!
-
-**工具调用格式:**
-使用maps_text_search工具搜索酒店时,必须严格按照以下格式:
-`[TOOL_CALL:amap_maps_text_search:keywords=酒店,city=城市名]`
-
-**示例:**
-用户: "搜索北京的酒店"
-你的回复: [TOOL_CALL:amap_maps_text_search:keywords=酒店,city=北京]
-
-**注意:**
-1. 必须使用工具,不要直接回答
-2. 格式必须完全正确,包括方括号和冒号
-3. 关键词使用"酒店"或"宾馆"
-"""
-
-PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点信息和天气信息,生成详细的旅行计划。
-
-请严格按照以下JSON格式返回旅行计划:
-```json
-{
-  "city": "城市名称",
-  "start_date": "YYYY-MM-DD",
-  "end_date": "YYYY-MM-DD",
-  "days": [
-    {
-      "date": "YYYY-MM-DD",
-      "day_index": 0,
-      "description": "第1天行程概述",
-      "transportation": "交通方式",
-      "accommodation": "住宿类型",
-      "hotel": {
-        "name": "酒店名称",
-        "address": "酒店地址",
-        "location": {"longitude": 116.397128, "latitude": 39.916527},
-        "price_range": "300-500元",
-        "rating": "4.5",
-        "distance": "距离景点2公里",
-        "type": "经济型酒店",
-        "estimated_cost": 400
-      },
-      "attractions": [
-        {
-          "name": "景点名称",
-          "address": "详细地址",
-          "location": {"longitude": 116.397128, "latitude": 39.916527},
-          "visit_duration": 120,
-          "description": "景点详细描述",
-          "category": "景点类别",
-          "ticket_price": 60
-        }
-      ],
-      "meals": [
-        {"type": "breakfast", "name": "早餐推荐", "description": "早餐描述", "estimated_cost": 30},
-        {"type": "lunch", "name": "午餐推荐", "description": "午餐描述", "estimated_cost": 50},
-        {"type": "dinner", "name": "晚餐推荐", "description": "晚餐描述", "estimated_cost": 80}
-      ]
-    }
-  ],
-  "weather_info": [
-    {
-      "date": "YYYY-MM-DD",
-      "day_weather": "晴",
-      "night_weather": "多云",
-      "day_temp": 25,
-      "night_temp": 15,
-      "wind_direction": "南风",
-      "wind_power": "1-3级"
-    }
-  ],
-  "overall_suggestions": "总体建议",
-  "budget": {
-    "total_attractions": 180,
-    "total_hotels": 1200,
-    "total_meals": 480,
-    "total_transportation": 200,
-    "total": 2060
-  }
-}
-```
-
-**重要提示:**
-1. weather_info数组必须包含每一天的天气信息
-2. 温度必须是纯数字(不要带°C等单位)
-3. 每天安排2-3个景点
-4. 考虑景点之间的距离和游览时间
-5. 每天必须包含早中晚三餐
-6. 提供实用的旅行建议
-7. **必须包含预算信息**:
-   - 景点门票价格(ticket_price)
-   - 餐饮预估费用(estimated_cost)
-   - 酒店预估费用(estimated_cost)
-   - 预算汇总(budget)包含各项总费用
-"""
-
+_POI_RESULT = TypeVar("_POI_RESULT", bound=AttractionResult | HotelResult)
+_STEP_RESULT = TypeVar("_STEP_RESULT")
 
 class MultiAgentTripPlanner:
     """多智能体旅行规划系统"""
 
-    def __init__(self, llm, amap_tool, event_sink=None, failure_recorder=None):
+    def __init__(self, llm, amap_tool, event_sink=None, failure_recorder=None, result_recorder=None):
         """初始化多智能体系统：LLM 与高德 MCP 工具由调用方注入（真实实例或测试桩）。
 
         Args:
@@ -161,6 +49,8 @@ class MultiAgentTripPlanner:
             amap_tool: 高德 MCP 工具（须支持 add_tool 的 auto_expand 展开契约，如 MCPTool）
             event_sink: 可选事件发布函数 (event_type, data) -> None；四步编排各发一条
                 step_started（SSE 真实进度）。不提供则保持无事件行为。
+            failure_recorder: 可选 ToolFailureRecorder（工具失败证据，按 Run 隔离）。
+            result_recorder: 可选 ToolResultRecorder（工具成功原始结果，供中间结果类型化）。
         """
         print("🔄 开始初始化多智能体旅行规划系统...")
 
@@ -169,6 +59,7 @@ class MultiAgentTripPlanner:
             self.amap_tool = amap_tool
             self.event_sink = event_sink
             self.failure_recorder = failure_recorder
+            self.result_recorder = result_recorder
 
             # 共享MCP工具由调用方注入(底层只有一个MCP服务器进程)
             print("  - 使用注入的共享MCP工具...")
@@ -228,7 +119,7 @@ class MultiAgentTripPlanner:
                 pass
 
     def plan_trip(self, request: TripRequest) -> PlanningOutcome:
-        """按四步流水线生成计划；搜索失败显式降级，最终规划失败向 runner 抛出。"""
+        """按四步流水线生成计划；搜索步骤输出经类型化中间结果校验，失败显式降级。"""
         print(f"\n{'='*60}")
         print("🚀 开始多智能体协作规划旅行...")
         print(f"目的地: {request.city}")
@@ -237,35 +128,99 @@ class MultiAgentTripPlanner:
         print(f"偏好: {', '.join(request.preferences) if request.preferences else '无'}")
         print(f"{'='*60}\n")
 
-        self._emit("step_started", {"step": "attractions", "label": "搜索景点", "city": request.city})
-        attraction_response = self.attraction_agent.run(self._build_attraction_query(request))
-        warnings = self._step_warnings("景点搜索", attraction_response)
-        if warnings:
-            return self._degraded_outcome(request, warnings)
+        step_warnings: list[str] = []
 
-        self._emit("step_started", {"step": "weather", "label": "查询天气", "city": request.city})
-        weather_response = self.weather_agent.run(f"请查询{request.city}的天气信息")
-        warnings = self._step_warnings("天气查询", weather_response)
-        if warnings:
+        attractions, warnings = self._run_search_step(
+            request=request,
+            step="attractions",
+            label="景点搜索",
+            agent=self.attraction_agent,
+            query=self._build_attraction_query(request),
+            tool_name="amap_maps_text_search",
+            parser=self._parse_attractions,
+        )
+        if attractions is None:
             return self._degraded_outcome(request, warnings)
+        step_warnings += warnings
 
-        self._emit("step_started", {"step": "hotels", "label": "推荐酒店", "city": request.city})
-        hotel_response = self.hotel_agent.run(f"请搜索{request.city}的{request.accommodation}酒店")
-        warnings = self._step_warnings("酒店搜索", hotel_response)
-        if warnings:
+        weather, warnings = self._run_search_step(
+            request=request,
+            step="weather",
+            label="天气查询",
+            agent=self.weather_agent,
+            query=f"请查询{request.city}的天气信息",
+            tool_name="amap_maps_weather",
+            parser=self._parse_weather,
+        )
+        if weather is None:
             return self._degraded_outcome(request, warnings)
+        step_warnings += warnings
+
+        hotels, warnings = self._run_search_step(
+            request=request,
+            step="hotels",
+            label="酒店搜索",
+            agent=self.hotel_agent,
+            query=f"请搜索{request.city}的{request.accommodation}酒店",
+            tool_name="amap_maps_text_search",
+            parser=self._parse_hotels,
+        )
+        if hotels is None:
+            return self._degraded_outcome(request, warnings)
+        step_warnings += warnings
 
         self._emit("step_started", {"step": "plan", "label": "生成行程计划", "city": request.city})
-        planner_query = self._build_planner_query(request, attraction_response, weather_response, hotel_response)
+        planner_query, isolation_warnings = self._build_planner_query(
+            request, attractions, weather, hotels
+        )
         planner_response = self.planner_agent.run(planner_query)
         trip_plan = self._parse_response(planner_response, request)
-        return PlanningOutcome(plan=trip_plan, warnings=[])
+        return PlanningOutcome(plan=trip_plan, warnings=step_warnings + isolation_warnings)
 
-    def _step_warnings(self, label: str, response: str) -> list[str]:
+    def _drain_failure_evidence(self, label: str) -> list[str]:
+        """取回本步骤工具执行的失败证据（tool_result 事件携带 error 的结构化证据）。"""
         evidence = self.failure_recorder.drain() if self.failure_recorder is not None else []
-        if not response.strip():
-            evidence.append("Agent 返回空结果")
         return [f"{label}失败: {item}" for item in evidence]
+
+    def _run_search_step(
+        self,
+        request: TripRequest,
+        step: str,
+        label: str,
+        agent: _AgentRunner,
+        query: str,
+        tool_name: str,
+        parser: Callable[[str], tuple[_STEP_RESULT | None, str | None]],
+    ) -> tuple[_STEP_RESULT | None, list[str]]:
+        """执行一个搜索步骤并返回类型化中间结果。
+
+        步骤输出 = 工具实际返回经 Pydantic schema 校验后的类型化结果，而非 Agent 的
+        自由文本。工具失败 / 结果缺失 / schema 校验失败 / 空结果均返回 (None, warnings)
+        并由调用方显式降级，不伪造成功。校验失败时额外发布 ``validation_error`` 事件。
+
+        参数较多（7 个）是故意的：一个步骤的调用捆绑了互不相关的独立输入（步骤标识 /
+        Agent / 查询 / 工具名 / 解析器），合并为值对象只会为一处调用增加一层包装。
+
+        Returns:
+            (typed, warnings)：成功返回 (typed, [])；失败返回 (None, warnings)。
+        """
+        self._emit("step_started", {"step": step, "label": label, "city": request.city})
+        agent.run(query)
+        warnings = self._drain_failure_evidence(label)
+        raw_results = self.result_recorder.drain() if self.result_recorder is not None else {}
+        raw = raw_results.get(tool_name, "")
+        if not raw:
+            if not warnings:
+                warnings.append(f"{label}失败: 未捕获到工具返回结果")
+            return None, warnings
+        typed, error = parser(raw)
+        if error is not None:
+            warnings.append(f"{label}失败: 中间结果校验失败: {error}")
+            self._emit("validation_error", {"step": step, "label": label, "error": error})
+            return None, warnings
+        # 即使步骤最终产出类型化结果，也要保留本步内发生过的工具失败证据
+        #（如"先失败、重试后成功"），由调用方按 warnings 判定是否降级——不吞掉失败。
+        return typed, warnings
 
     def _degraded_outcome(self, request: TripRequest, warnings: list[str]) -> PlanningOutcome:
         return PlanningOutcome(plan=self._create_empty_shell(request), warnings=warnings)
@@ -294,8 +249,27 @@ class MultiAgentTripPlanner:
         query = f"请使用amap_maps_text_search工具搜索{request.city}的{keywords}相关景点。\n[TOOL_CALL:amap_maps_text_search:keywords={keywords},city={request.city}]"
         return query
 
-    def _build_planner_query(self, request: TripRequest, attractions: str, weather: str, hotels: str = "") -> str:
-        """构建行程规划查询"""
+    def _build_planner_query(
+        self,
+        request: TripRequest,
+        attractions: AttractionResult,
+        weather: WeatherResult,
+        hotels: HotelResult,
+    ) -> tuple[str, list[str]]:
+        """基于类型化中间结果组装规划提示词：只消费白名单字段并做不可信隔离。
+
+        Returns:
+            (query, warnings)：warnings 记录被隔离的可疑条目 / 自由文本（终态降级依据）。
+        """
+        attraction_context, isolation_warnings = self._render_pois(attractions.pois, "景点")
+        hotel_context, hotel_warnings = self._render_pois(hotels.pois, "酒店")
+        isolation_warnings += hotel_warnings
+        weather_context, weather_warnings = self._render_weather(weather.forecasts)
+        isolation_warnings += weather_warnings
+
+        preferences, preference_warnings = self._render_preferences(request.preferences)
+        isolation_warnings += preference_warnings
+
         query = f"""请根据以下信息生成{request.city}的{request.travel_days}天旅行计划:
 
 **基本信息:**
@@ -304,29 +278,136 @@ class MultiAgentTripPlanner:
 - 天数: {request.travel_days}天
 - 交通方式: {request.transportation}
 - 住宿: {request.accommodation}
-- 偏好: {', '.join(request.preferences) if request.preferences else '无'}
+- 偏好: {preferences}
 
 **景点信息:**
-{attractions}
+{attraction_context or "（无景点数据）"}
 
 **天气信息:**
-{weather}
+{weather_context or "（无天气数据）"}
 
 **酒店信息:**
-{hotels}
+{hotel_context or "（无酒店数据）"}
 
 **要求:**
 1. 每天安排2-3个景点
 2. 每天必须包含早中晚三餐
 3. 每天推荐一个具体的酒店(从酒店信息中选择)
-3. 考虑景点之间的距离和交通方式
-4. 返回完整的JSON格式数据
-5. 景点的经纬度坐标要真实准确
+4. 考虑景点之间的距离和交通方式
+5. 返回完整的JSON格式数据
+6. 景点的经纬度坐标要真实准确
 """
         if request.free_text_input:
-            query += f"\n**额外要求:** {request.free_text_input}"
+            if contains_directive(request.free_text_input):
+                isolation_warnings.append("已隔离自由文本输入中的可疑指令内容")
+            else:
+                free_text = sanitize_untrusted(request.free_text_input, limit=FREE_TEXT_LIMIT)
+                query += f"\n**额外要求:** {free_text}"
 
-        return query
+        return query, isolation_warnings
+
+    def _render_preferences(self, preferences: list[str]) -> tuple[str, list[str]]:
+        """渲染用户偏好为单行白名单上下文；含指令标记的偏好整体隔离（与自由文本同规则）。"""
+        clean: list[str] = []
+        warnings: list[str] = []
+        for preference in preferences:
+            if contains_directive(preference):
+                warnings.append("已隔离偏好中的可疑指令内容")
+                continue
+            clean.append(sanitize_untrusted(preference, limit=FIELD_LIMIT))
+        if not clean:
+            return "无", warnings
+        return ", ".join(clean), warnings
+
+    def _render_pois(
+        self, pois: Sequence[Union[AttractionPOI, HotelPOI]], kind: str
+    ) -> tuple[str, list[str]]:
+        """渲染 POI 白名单字段（名称 / 地址）；可疑条目整体隔离并记入 warnings。"""
+        lines: list[str] = []
+        warnings: list[str] = []
+        for poi in pois:
+            raw_name = poi.name or ""
+            raw_address = poi.address or ""
+            if contains_directive(raw_name) or contains_directive(raw_address):
+                warnings.append(f"{kind}结果已隔离疑似注入的条目")
+                continue
+            rendered = sanitize_untrusted(raw_name, limit=FIELD_LIMIT)
+            if raw_address:
+                rendered += f"（{sanitize_untrusted(raw_address, limit=FIELD_LIMIT)}）"
+            lines.append(f"- {rendered}")
+        return "\n".join(lines), warnings
+
+    def _render_weather(self, forecasts: list[WeatherForecast]) -> tuple[str, list[str]]:
+        """渲染天气白名单字段；可疑预报条目整体隔离并记入 warnings。"""
+        lines: list[str] = []
+        warnings: list[str] = []
+        for day in forecasts:
+            raw = (
+                day.date,
+                day.dayweather,
+                day.nightweather,
+                day.daytemp,
+                day.nighttemp,
+                day.daywind,
+                day.daypower,
+            )
+            if any(contains_directive(field) for field in raw):
+                warnings.append("天气结果已隔离疑似注入的预报条目")
+                continue
+            date, day_weather, night_weather, day_temp, night_temp, wind_direction, wind_power = (
+                sanitize_untrusted(field, limit=WEATHER_FIELD_LIMIT) for field in raw
+            )
+            lines.append(
+                f"- {date}: {day_weather}/{night_weather} {day_temp}°C~{night_temp}°C {wind_direction}{wind_power}"
+            )
+        return "\n".join(lines), warnings
+
+    def _parse_attractions(self, raw: str) -> tuple[AttractionResult | None, str | None]:
+        """解析景点搜索原始返回为类型化中间结果；失败返回 (None, 原因)。"""
+        return self._parse_poi_result(raw, AttractionResult)
+
+    def _parse_hotels(self, raw: str) -> tuple[HotelResult | None, str | None]:
+        """解析酒店搜索原始返回为类型化中间结果；失败返回 (None, 原因)。"""
+        return self._parse_poi_result(raw, HotelResult)
+
+    def _parse_poi_result(
+        self, raw: str, model: type[_POI_RESULT]
+    ) -> tuple[_POI_RESULT | None, str | None]:
+        """解析 POI 类（景点 / 酒店）原始返回；结构性非法或空结果视为无效。"""
+        data = _extract_json(raw)
+        if data is None:
+            return None, "工具返回不是可解析的 JSON"
+        try:
+            result = model.model_validate(data)
+        except ValidationError as e:
+            return None, self._validation_error_text(e)
+        if not result.pois:
+            return None, "返回空结果"
+        return result, None
+
+    def _parse_weather(self, raw: str) -> tuple[WeatherResult | None, str | None]:
+        """解析天气搜索原始返回为类型化中间结果；结构性非法或空结果视为无效。"""
+        data = _extract_json(raw)
+        if data is None:
+            return None, "工具返回不是可解析的 JSON"
+        try:
+            result = WeatherResult(**data)
+        except ValidationError as e:
+            return None, self._validation_error_text(e)
+        if not result.forecasts:
+            return None, "返回空结果"
+        return result, None
+
+    @staticmethod
+    def _validation_error_text(e: ValidationError) -> str:
+        """把 Pydantic 校验错误压成单行摘要（loc: msg），便于写入降级警告。"""
+        errors = e.errors()
+        if not errors:
+            return "schema 校验失败"
+        first = errors[0]
+        loc = ".".join(str(part) for part in first.get("loc", ()))
+        message = first.get("msg", "")
+        return f"{loc}: {message}" if loc else message
     
     def _parse_response(self, response: str, request: TripRequest) -> TripPlan:
         """从 Agent 响应中提取 JSON 并构造 TripPlan；任何失败向 runner 抛出（不伪造成功）。"""
@@ -353,4 +434,28 @@ class MultiAgentTripPlanner:
 
         # 转换为TripPlan对象
         return TripPlan(**data)
+
+
+def _extract_json(raw: str) -> dict | None:
+    """从工具原始返回中提取 JSON 对象（容忍 MCP 前缀包装与非 JSON 噪音）。
+
+    生产路径（MCPTool.run）返回 ``工具 'X' 执行结果:\\n{...}`` 前缀字符串；
+    桩实现直接返回 JSON 字符串。先剥离前缀再解析，失败时回退到首尾花括号切片。
+    """
+    text = raw.strip()
+    if "执行结果:" in text:
+        text = text.split("执行结果:", 1)[1].strip()
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, TypeError):
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            parsed = json.loads(text[start:end + 1])
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
 
