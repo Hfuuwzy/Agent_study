@@ -213,7 +213,8 @@ import { computed, ref, reactive, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { generateTripPlan, subscribeRunEvents } from '@/services/api'
-import type { RunCompletedPayload, RunEvent, TripFormData } from '@/types'
+import { clearTripRunResult, saveTripRunResult } from '@/services/runStorage'
+import type { RunCompletedPayload, RunEvent, TripFormData, TripRunResult } from '@/types'
 import type { Dayjs } from 'dayjs'
 
 const router = useRouter()
@@ -335,51 +336,95 @@ const handleRunEvent = (event: RunEvent) => {
       toolActivity.value = `⚠️ ${event.data.message || '输出校验未通过'}`
       break
     case 'run_completed':
-      handleRunCompleted(event.data as unknown as RunCompletedPayload)
+      handleRunCompleted(event.run_id, event.data as unknown as RunCompletedPayload)
       break
   }
 }
 
-const handleRunCompleted = (data: RunCompletedPayload) => {
-  const warnings = data.warnings || []
-  runWarnings.value = warnings
-  loadingStatus.value = '运行已结束'
-  toolActivity.value = ''
-  // 终态：关闭 SSE 连接，避免 EventSource 自动重连（终态只会执行一次）
+// 校验 run_completed 终态载荷与后端终态契约的一致性：
+// success/degraded 必须携带非空 result；degraded/failed 必须携带非空 warnings。
+// 非法终态视作异常：不跳转、不渲染，防止把不完整/自相矛盾的结果伪装成成功。
+const validateTerminalPayload = (data: RunCompletedPayload): string | null => {
+  const warnings = Array.isArray(data.warnings) ? data.warnings : []
+  const hasResult = data.result !== null && data.result !== undefined
+  switch (data.status) {
+    case 'success':
+      return hasResult ? null : '运行终态不完整：success 必须携带行程结果'
+    case 'degraded':
+      if (!hasResult) return '运行终态不完整：degraded 必须携带行程结果'
+      return warnings.length > 0 ? null : '运行终态不完整：degraded 必须携带降级告警清单'
+    case 'failed':
+      return warnings.length > 0 ? null : '运行终态不完整：failed 必须携带失败告警清单'
+    default:
+      return '收到无法识别的运行终态'
+  }
+}
+
+const handleRunCompleted = (runId: string, data: RunCompletedPayload) => {
+  // 先校验终态载荷：非法终态直接停止（不跳转、清残留存储、如实报错），
+  // 同时关闭订阅并清空活动 run 引用，迟到回调无法再触达 UI
+  const validationError = validateTerminalPayload(data)
+  if (validationError) {
+    unsubscribeRun?.()
+    unsubscribeRun = null
+    activeRunId = null
+    loading.value = false
+    loadingStatus.value = '运行已结束'
+    toolActivity.value = ''
+    clearTripRunResult()
+    runError.value = validationError
+    runWarnings.value = []
+    message.error(validationError)
+    return
+  }
+
+  // warnings 在终态契约中必然存在；对缺失做空数组兜底，避免旧事件形状导致渲染异常
+  const warnings: string[] = Array.isArray(data.warnings) ? data.warnings : []
+  const envelope: TripRunResult = {
+    run_id: runId,
+    status: data.status,
+    warnings,
+    result: data.result ?? null,
+    error: data.error ?? null
+  }
+  // 先捕获 run_id 到信封，再关闭 SSE 订阅、清空活动 run 引用；
+  // 此后任何迟到回调都无法改写属于本次运行的终态
   unsubscribeRun?.()
   unsubscribeRun = null
   activeRunId = null
-  if (data.status === 'success' || data.status === 'degraded') {
-    // 终态事件携带计划结果，直接落 sessionStorage 供结果页渲染
-    let storageError = ''
-    if (!data.result) {
-      storageError = '旅行计划生成完成，但未收到可展示的结果，请重试'
-    } else {
-      try {
-        sessionStorage.setItem('tripPlan', JSON.stringify(data.result))
-      } catch (error: unknown) {
-        storageError = error instanceof Error
-          ? `旅行计划已生成，但结果保存失败：${error.message}`
-          : '旅行计划已生成，但结果保存失败，请重试'
-      }
-    }
-    if (storageError) {
-      loading.value = false
-      runError.value = storageError
-      message.error(storageError)
-      return
-    }
-    if (data.status === 'success') {
-      message.success('旅行计划生成成功!')
-    } else {
-      message.warning(warnings.length > 0 ? `行程已降级生成：${warnings[0]}` : '行程已降级生成，部分数据可能缺失')
-    }
-    handleSuccess()
-  } else {
-    loading.value = false
-    runError.value = data.error || '运行失败，请稍后重试'
-    message.error(runError.value)
+  loadingStatus.value = '运行已结束'
+  toolActivity.value = ''
+
+  // 完整终态信封落 sessionStorage：success/degraded/failed 一律保存，交由结果页如实渲染
+  let storageError = ''
+  try {
+    saveTripRunResult(envelope)
+  } catch (error: unknown) {
+    storageError = error instanceof Error
+      ? `运行已结束，但结果保存失败：${error.message}`
+      : '运行已结束，但结果保存失败，请重试'
   }
+  if (storageError) {
+    // 存储失败时保持诚实：不跳转，并清除可能残留的旧 run 信封，防止误读过期结果
+    clearTripRunResult()
+    loading.value = false
+    runError.value = storageError
+    runWarnings.value = []
+    message.error(storageError)
+    return
+  }
+
+  if (data.status === 'success') {
+    message.success('旅行计划生成成功!')
+  } else if (data.status === 'degraded') {
+    message.warning(warnings.length > 0 ? `行程已降级生成：${warnings[0]}` : '行程已降级生成，部分数据可能缺失')
+  } else {
+    message.error(data.error || '运行失败，请稍后重试')
+  }
+  runError.value = ''
+  runWarnings.value = []
+  // 所有合法终态（success / degraded / failed）都跳转结果页，由结果页三态如实呈现
+  handleSuccess()
 }
 
 const handleSuccess = () => {

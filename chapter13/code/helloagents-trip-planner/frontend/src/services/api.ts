@@ -1,5 +1,12 @@
 import axios from 'axios'
-import type { RunAcceptance, RunEvent, RunEventType, RunStatusResponse, TripFormData } from '@/types'
+import type {
+  AttractionPhotoResponse,
+  RunAcceptance,
+  RunEvent,
+  RunEventType,
+  RunStatusResponse,
+  TripFormData
+} from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -96,6 +103,15 @@ export function subscribeRunEvents(
 
 export async function healthCheck(): Promise<unknown> {
   const response = await apiClient.get('/health')
+  return response.data
+}
+
+/** 获取景点图片（复用同一 axios 客户端）。后端未命中/失败也返回 HTTP 200，
+ *  以顶层 photo_url/is_placeholder/warnings 表达语义，此处只做类型化透传。 */
+export async function getAttractionPhoto(name: string): Promise<AttractionPhotoResponse> {
+  const response = await apiClient.get<AttractionPhotoResponse>('/api/poi/photo', {
+    params: { name }
+  })
   return response.data
 }
 
