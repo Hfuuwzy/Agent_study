@@ -150,6 +150,17 @@ class TripPlan(BaseModel):
     budget: Optional[Budget] = Field(default=None, description="预算信息")
 
 
+class PlanningOutcome(BaseModel):
+    """编排层规划结果：计划 + 本次运行的告警清单。
+
+    终态映射（runner 消费）：warnings 为空 -> success；warnings 非空 -> degraded；
+    plan 恒为合法 TripPlan（降级时为不含虚构地点数据的空壳）。
+    """
+
+    plan: TripPlan = Field(..., description="旅行计划（降级时为空壳）")
+    warnings: List[str] = Field(default_factory=list, description="降级/失败告警清单")
+
+
 class TripPlanResponse(BaseModel):
     """旅行计划响应"""
     success: bool = Field(..., description="是否成功")

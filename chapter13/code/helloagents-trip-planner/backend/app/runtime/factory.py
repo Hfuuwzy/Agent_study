@@ -23,7 +23,7 @@ from ..agents.trip_planner_agent import MultiAgentTripPlanner
 from ..services.amap_service import AmapService, create_amap_mcp_tool
 from ..services.llm_service import create_llm
 from ..services.unsplash_service import UnsplashService, create_unsplash
-from .probe import EventEmittingAmapTool
+from .probe import EventEmittingAmapTool, ToolFailureRecorder
 from .registry import RunRegistry
 from .runner import RunRunner
 
@@ -66,12 +66,15 @@ class RuntimeFactory:
                 事件（SSE 真实进度）；编排器四步各发 step_started。不提供则保持无事件行为。
         """
         amap_tool = self.create_amap_tool()
+        failure_recorder = None
         if event_sink is not None:
-            amap_tool = EventEmittingAmapTool(amap_tool, event_sink)
+            failure_recorder = ToolFailureRecorder()
+            amap_tool = EventEmittingAmapTool(amap_tool, failure_recorder.wrap(event_sink))
         return MultiAgentTripPlanner(
             llm=self.create_llm(),
             amap_tool=amap_tool,
             event_sink=event_sink,
+            failure_recorder=failure_recorder,
         )
 
     def create_amap_service(self) -> AmapService:

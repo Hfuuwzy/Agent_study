@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -29,6 +29,7 @@ class RunRecord(BaseModel):
     status: RunStatus = Field(default=RunStatus.pending, description="当前状态")
     request: TripRequest = Field(..., description="受理的旅行请求")
     result: Optional[TripPlan] = Field(default=None, description="运行结果(终态时存在)")
+    warnings: List[str] = Field(default_factory=list, description="降级/失败告警清单(per-run)")
     error: Optional[str] = Field(default=None, description="失败原因(仅 failed)")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -49,6 +50,7 @@ class RunStatusResponse(BaseModel):
     status: RunStatus = Field(..., description="当前状态")
     request: TripRequest = Field(..., description="本次运行的请求")
     result: Optional[TripPlan] = Field(default=None, description="运行结果(终态时存在)")
+    warnings: List[str] = Field(default_factory=list, description="降级/失败告警清单(per-run)")
     error: Optional[str] = Field(default=None, description="失败原因(仅 failed)")
     created_at: datetime = Field(..., description="创建时间")
     updated_at: datetime = Field(..., description="最后更新时间")

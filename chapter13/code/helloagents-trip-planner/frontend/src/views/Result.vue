@@ -6,18 +6,18 @@
         ← 返回首页
       </a-button>
       <a-space size="middle">
-        <a-button v-if="!editMode" @click="toggleEditMode" type="default">
+        <a-button v-if="!editMode && canManagePlan" @click="toggleEditMode" type="default">
           ✏️ 编辑行程
         </a-button>
-        <a-button v-else @click="saveChanges" type="primary">
+        <a-button v-else-if="editMode" @click="saveChanges" type="primary">
           💾 保存修改
         </a-button>
         <a-button v-if="editMode" @click="cancelEdit" type="default">
           ❌ 取消编辑
         </a-button>
 
-        <!-- 导出按钮 -->
-        <a-dropdown v-if="!editMode">
+        <!-- 导出按钮（仅可管理的计划展示；失败/空壳降级不提供） -->
+        <a-dropdown v-if="canManagePlan && !editMode">
           <template #overlay>
             <a-menu>
               <a-menu-item key="image" @click="exportAsImage">
@@ -35,9 +35,9 @@
       </a-space>
     </div>
 
-    <div v-if="tripPlan" class="content-wrapper">
-      <!-- 侧边导航 -->
-      <div class="side-nav">
+    <div v-if="run" class="content-wrapper">
+      <!-- 侧边导航（仅成功/降级且计划可用时展示） -->
+      <div v-if="showPlanContent && tripPlan" class="side-nav">
         <a-affix :offset-top="80">
           <a-menu mode="inline" :selected-keys="[activeSection]" @click="scrollToSection">
             <a-menu-item key="overview">
@@ -46,7 +46,7 @@
             <a-menu-item key="budget" v-if="tripPlan.budget">
               <span>💰 预算明细</span>
             </a-menu-item>
-            <a-menu-item key="map">
+            <a-menu-item key="map" v-if="hasAttractionCoordinates">
               <span>📍 景点地图</span>
             </a-menu-item>
             <a-sub-menu key="days" title="📅 每日行程">
@@ -63,10 +63,54 @@
 
       <!-- 主内容区 -->
       <div class="main-content">
+        <!-- 终态如实呈现：success / degraded / failed（位于 main-content 内，导出时一并保留） -->
+        <a-alert
+          v-if="isSuccess"
+          type="success"
+          show-icon
+          message="旅行计划生成成功"
+          description="以下行程由多智能体编排生成，数据完整可用"
+          class="status-alert"
+        />
+        <a-alert
+          v-else-if="isDegraded"
+          type="warning"
+          show-icon
+          :message="`旅行计划已降级（${warnings.length} 项数据缺失或不可用）`"
+          class="status-alert"
+        >
+          <template #description>
+            <div class="degraded-desc">以下环节未按预期完成；缺失或<span style="white-space: nowrap;">不可用</span>的数据已从页面中省略、<span style="white-space: nowrap;">不展示</span>，页面不会用虚构内容填充：</div>
+            <ul class="warning-list">
+              <li v-for="(warning, index) in warnings" :key="`${index}-${warning}`">{{ warning }}</li>
+            </ul>
+            <p class="run-id">运行编号：{{ run?.run_id }}</p>
+          </template>
+        </a-alert>
+        <a-result
+          v-else-if="isFailed"
+          status="error"
+          title="旅行计划生成失败"
+          class="failed-result"
+        >
+          <template #subTitle>
+            <p class="failed-error">{{ errorMessage || '运行失败，未知原因' }}</p>
+            <ul v-if="warnings.length > 0" class="warning-list">
+              <li v-for="(warning, index) in warnings" :key="`${index}-${warning}`">{{ warning }}</li>
+            </ul>
+            <p class="run-id">运行编号：{{ run?.run_id }}</p>
+          </template>
+          <template #extra>
+            <a-button type="primary" @click="goBack">🔄 重新规划</a-button>
+            <a-button @click="goBack">返回首页</a-button>
+          </template>
+        </a-result>
+
+        <template v-if="showPlanContent && tripPlan">
         <!-- 顶部信息区:左侧概览+预算,右侧地图 -->
         <div class="top-info-section">
           <!-- 左侧:行程概览和预算明细 -->
-          <div class="left-info">
+          <div class="left-info" :class="{ 'left-info-expand': !hasAttractionCoordinates }">
             <!-- 行程概览 -->
             <a-card id="overview" :title="`${tripPlan.city}旅行计划`" :bordered="false" class="overview-card">
               <div class="overview-content">
@@ -108,8 +152,8 @@
             </a-card>
           </div>
 
-          <!-- 右侧:地图 -->
-          <div class="right-map">
+          <!-- 右侧:地图（仅当存在真实景点坐标时渲染，无坐标不加载地图） -->
+          <div v-if="hasAttractionCoordinates" class="right-map">
             <a-card id="map" title="📍 景点地图" :bordered="false" class="map-card">
               <div id="amap-container" style="width: 100%; height: 100%"></div>
             </a-card>
@@ -183,19 +227,32 @@
                         </a-space>
                       </template>
 
-                      <!-- 景点图片 -->
+                      <!-- 景点图片：真实图片或标注"暂无真实图片"的中性占位图 -->
                       <div class="attraction-image-wrapper">
                         <img
-                          :src="getAttractionImage(item.name, index)"
+                          :src="getAttractionImage(item.name)"
                           :alt="item.name"
                           class="attraction-image"
-                          @error="handleImageError"
+                          @error="onImageError(item.name)"
                         />
                         <div class="attraction-badge">
                           <span class="badge-number">{{ index + 1 }}</span>
                         </div>
                         <div v-if="item.ticket_price" class="price-tag">
                           ¥{{ item.ticket_price }}
+                        </div>
+                        <div v-if="!hasRealPhoto(item.name)" class="photo-placeholder-badge">
+                          📄 示意图
+                        </div>
+                      </div>
+                      <!-- 图片降级/失败告警：与行程数据分离呈现 -->
+                      <div v-if="!hasRealPhoto(item.name) && photoWarnings(item.name).length > 0" class="photo-warnings">
+                        <div
+                          v-for="warning in photoWarnings(item.name)"
+                          :key="warning"
+                          class="photo-warning"
+                        >
+                          ⚠️ {{ warning }}
                         </div>
                       </div>
 
@@ -285,6 +342,19 @@
           </template>
         </a-list>
         </a-card>
+        </template>
+
+        <!-- 降级空壳：无真实行程可展示，给出明确不可用状态，不伪造行程/地图 -->
+        <div v-else-if="isDegraded" class="unavailable-block">
+          <a-empty>
+            <template #image>
+              <div style="font-size: 80px;">🗺️</div>
+            </template>
+            <template #description>
+              <span style="color: #666;">本次运行是降级产物，且没有可展示的<span style="white-space: nowrap;">真实</span>行程数据</span>
+            </template>
+          </a-empty>
+        </div>
       </div>
     </div>
 
@@ -293,7 +363,7 @@
         <div style="font-size: 80px;">🗺️</div>
       </template>
       <template #description>
-        <span style="color: #999;">暂无旅行计划数据,请先创建行程</span>
+        <span style="color: #666;">暂无旅行计划数据,请先创建行程</span>
       </template>
       <a-button type="primary" @click="goBack">返回首页创建行程</a-button>
     </a-empty>
@@ -308,34 +378,103 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { DownOutlined } from '@ant-design/icons-vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
-import type { TripPlan } from '@/types'
+import type { Location, TerminalRunStatus, TripPlan, TripRunResult } from '@/types'
+import { getAttractionPhoto } from '@/services/api'
+import { loadTripRunResult, saveTripRunResult } from '@/services/runStorage'
 
 const router = useRouter()
+// 完整终态信封：结果页三态渲染的唯一依据（status / warnings / run_id / error / result）
+const run = ref<TripRunResult | null>(null)
 const tripPlan = ref<TripPlan | null>(null)
 const editMode = ref(false)
 const originalPlan = ref<TripPlan | null>(null)
-const attractionPhotos = ref<Record<string, string>>({})
+
+interface AttractionPhotoState {
+  photoUrl: string | null
+  isPlaceholder: boolean
+  warnings: string[]
+  broken: boolean
+}
+const attractionPhotos = ref<Record<string, AttractionPhotoState>>({})
 const activeSection = ref('overview')
 const activeDays = ref<number[]>([0]) // 默认展开第一天
 let map: any = null
 
+const status = computed<TerminalRunStatus | null>(() => run.value?.status ?? null)
+const isSuccess = computed(() => status.value === 'success')
+const isDegraded = computed(() => status.value === 'degraded')
+const isFailed = computed(() => status.value === 'failed')
+const warnings = computed<string[]>(() => run.value?.warnings ?? [])
+const errorMessage = computed(() => run.value?.error ?? '')
+
+// 计划是否"可用"：至少一天包含至少一个真实景点（空壳降级计划没有可展示的行程）
+const hasUsablePlan = computed(() => {
+  const plan = tripPlan.value
+  if (!plan) return false
+  return plan.days.some((day) => Array.isArray(day.attractions) && day.attractions.length > 0)
+})
+
+// 坐标是否可靠：有限且非 0（(0,0) 是典型"未设置"哨兵值，视为无坐标）
+const isReliableCoordinate = (location: Location | null | undefined): boolean => {
+  if (!location) return false
+  return (
+    Number.isFinite(location.longitude) &&
+    Number.isFinite(location.latitude) &&
+    location.longitude !== 0 &&
+    location.latitude !== 0
+  )
+}
+
+// 是否存在至少一个真实景点坐标：只有满足才加载地图，绝不使用北京默认中心
+const hasAttractionCoordinates = computed(() => {
+  const plan = tripPlan.value
+  if (!plan) return false
+  return plan.days.some((day) =>
+    day.attractions.some((attraction) => isReliableCoordinate(attraction.location))
+  )
+})
+
+// 可控计划：成功或降级且计划可用时才允许编辑/导出；失败、空壳降级不提供行程控制
+const canManagePlan = computed(() => (isSuccess.value || isDegraded.value) && hasUsablePlan.value)
+
+// 计划内容展示：仅成功/降级且计划可用；失败不展示行程，空壳降级展示不可用状态
+const showPlanContent = computed(() => (isSuccess.value || isDegraded.value) && hasUsablePlan.value)
+
+// 第一个可靠坐标：作为地图初始中心，绝不用默认北京坐标
+const firstAttractionCoordinate = (): [number, number] | null => {
+  const plan = tripPlan.value
+  if (!plan) return null
+  for (const day of plan.days) {
+    for (const attraction of day.attractions) {
+      if (isReliableCoordinate(attraction.location)) {
+        return [attraction.location.longitude, attraction.location.latitude]
+      }
+    }
+  }
+  return null
+}
+
 onMounted(async () => {
-  const data = sessionStorage.getItem('tripPlan')
-  if (data) {
-    tripPlan.value = JSON.parse(data)
+  const envelope = loadTripRunResult()
+  if (!envelope) {
+    return
+  }
+  run.value = envelope
+  tripPlan.value = envelope.result
+  if (hasUsablePlan.value) {
     // 加载景点图片
     await loadAttractionPhotos()
-    // 等待DOM渲染完成后初始化地图
-    await nextTick()
-    initMap()
   }
+  // 等待DOM渲染完成后初始化地图（内部仅在存在真实坐标时加载）
+  await nextTick()
+  initMap()
 })
 
 const goBack = () => {
@@ -362,11 +501,19 @@ const toggleEditMode = () => {
 // 保存修改
 const saveChanges = () => {
   editMode.value = false
-  // 更新sessionStorage
-  if (tripPlan.value) {
-    sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
+  if (!run.value || !tripPlan.value) {
+    return
   }
-  message.success('修改已保存')
+  try {
+    // 保持 status/warnings/run_id/error 不变，只更新编辑后的 result
+    saveTripRunResult({
+      ...run.value,
+      result: tripPlan.value
+    })
+    message.success('修改已保存')
+  } catch (error: unknown) {
+    message.error(error instanceof Error ? `修改保存失败：${error.message}` : '修改保存失败，请重试')
+  }
 
   // 重新初始化地图以反映更改
   if (map) {
@@ -424,70 +571,82 @@ const getMealLabel = (type: string): string => {
   return labels[type] || type
 }
 
-// 加载所有景点图片
+// 加载所有景点图片：经类型化 photo API，消费后端顶层 photo_url / is_placeholder / warnings 契约
 const loadAttractionPhotos = async () => {
   if (!tripPlan.value) return
 
-  const promises: Promise<void>[] = []
-
+  const names = new Set<string>()
   tripPlan.value.days.forEach(day => {
     day.attractions.forEach(attraction => {
-      const promise = fetch(`http://localhost:8000/api/poi/photo?name=${encodeURIComponent(attraction.name)}`)
-        .then(res => res.json())
-        .then(data => {
-          if (data.success && data.data.photo_url) {
-            attractionPhotos.value[attraction.name] = data.data.photo_url
-          }
-        })
-        .catch(err => {
-          console.error(`获取${attraction.name}图片失败:`, err)
-        })
-
-      promises.push(promise)
+      names.add(attraction.name)
     })
   })
 
-  await Promise.all(promises)
+  const results: Record<string, AttractionPhotoState> = {}
+  const tasks = Array.from(names).map(async (name) => {
+    try {
+      const data = await getAttractionPhoto(name)
+      results[name] = {
+        photoUrl: data.photo_url,
+        isPlaceholder: data.is_placeholder,
+        warnings: Array.isArray(data.warnings) ? data.warnings : [],
+        broken: false
+      }
+    } catch (error: unknown) {
+      results[name] = {
+        photoUrl: null,
+        isPlaceholder: true,
+        warnings: [error instanceof Error ? `获取景点图片失败：${error.message}` : '获取景点图片失败'],
+        broken: false
+      }
+    }
+  })
+
+  await Promise.all(tasks)
+  attractionPhotos.value = results
 }
 
-// 获取景点图片
-const getAttractionImage = (name: string, index: number): string => {
-  // 如果已加载真实图片,返回真实图片
-  if (attractionPhotos.value[name]) {
-    return attractionPhotos.value[name]
-  }
-
-  // 返回一个纯色占位图(避免跨域问题)
-  const colors = [
-    { start: '#667eea', end: '#764ba2' },
-    { start: '#f093fb', end: '#f5576c' },
-    { start: '#4facfe', end: '#00f2fe' },
-    { start: '#43e97b', end: '#38f9d7' },
-    { start: '#fa709a', end: '#fee140' }
-  ]
-  const colorIndex = index % colors.length
-  const { start, end } = colors[colorIndex]
-
-  // 使用base64编码避免中文问题
+// 中性占位图：明确标注"暂无真实图片"，不展示与目的地无关的城市照片
+const placeholderDataUrl = (): string => {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300">
-    <defs>
-      <linearGradient id="grad${index}" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" style="stop-color:${start};stop-opacity:1" />
-        <stop offset="100%" style="stop-color:${end};stop-opacity:1" />
-      </linearGradient>
-    </defs>
-    <rect width="400" height="300" fill="url(#grad${index})"/>
-    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="24" font-weight="bold" fill="white">${name}</text>
+    <rect width="400" height="300" fill="#f0f0f0"/>
+    <text x="50%" y="46%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="bold" fill="#999">暂无真实图片</text>
+    <text x="50%" y="62%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#bbb">示意图，仅作展示</text>
   </svg>`
-
   return `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
 }
 
-// 图片加载失败时的处理
-const handleImageError = (event: Event) => {
-  const img = event.target as HTMLImageElement
-  // 使用灰色占位图
-  img.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="400" height="300"%3E%3Crect width="400" height="300" fill="%23f0f0f0"/%3E%3Ctext x="50%25" y="50%25" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="18" fill="%23999"%3E图片加载失败%3C/text%3E%3C/svg%3E'
+// 是否展示真实图片（后端给了 photo_url 且浏览器加载成功）
+const hasRealPhoto = (name: string): boolean => {
+  const state = attractionPhotos.value[name]
+  return !!state && !!state.photoUrl && !state.broken
+}
+
+// 该景点的图片降级/失败告警：与行程数据分离、单独呈现
+const photoWarnings = (name: string): string[] => {
+  const state = attractionPhotos.value[name]
+  return state ? state.warnings : []
+}
+
+// 获取景点图片地址：真实图片或"暂无真实图片"占位图
+const getAttractionImage = (name: string): string => {
+  const state = attractionPhotos.value[name]
+  if (state && !state.broken && state.photoUrl) {
+    return state.photoUrl
+  }
+  return placeholderDataUrl()
+}
+
+// 图片加载失败（真实图片 404/损坏）：切换为内联 SVG 占位图。
+// 占位图是 data: URL 不会再触发 error，从而避免递归替换。
+const onImageError = (name: string) => {
+  const state = attractionPhotos.value[name]
+  if (state && state.photoUrl && !state.broken) {
+    state.broken = true
+    if (!state.warnings.includes('图片加载失败，已替换为占位图')) {
+      state.warnings = [...state.warnings, '图片加载失败，已替换为占位图']
+    }
+  }
 }
 
 
@@ -786,8 +945,11 @@ const exportAsPDF = async () => {
   }
 }
 
-// 初始化地图
+// 初始化地图：仅当存在至少一个真实景点坐标时加载；以首个真实坐标为中心，绝不用北京默认
 const initMap = async () => {
+  if (!hasAttractionCoordinates.value) {
+    return
+  }
   try {
     // 环境适配: 高德 JS API 2.0 对 2021-12-02 后申请的 key 强制要求安全密钥,
     // 且 _AMapSecurityConfig 必须在 AMapLoader.load 之前挂到 window 上。
@@ -802,10 +964,16 @@ const initMap = async () => {
       plugins: ['AMap.Marker', 'AMap.Polyline', 'AMap.InfoWindow']
     })
 
+    // 以首个真实景点坐标作为地图初始中心（有坐标必然返回非空），随后 setFitView 收紧视野
+    const center = firstAttractionCoordinate()
+    if (!center) {
+      return
+    }
+
     // 创建地图实例
     map = new AMap.Map('amap-container', {
       zoom: 12,
-      center: [116.397128, 39.916527], // 默认中心点(北京)
+      center,
       viewMode: '3D'
     })
 
@@ -1358,6 +1526,85 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 
 :deep(.ant-list-item:hover) {
   transform: scale(1.02);
+}
+
+/* 终态状态区（success/degraded/failed） */
+.status-alert {
+  margin-bottom: 20px;
+}
+
+.degraded-desc {
+  font-weight: 500;
+}
+
+.warning-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
+.warning-list li {
+  margin-bottom: 4px;
+}
+
+.run-id {
+  margin-top: 12px;
+  color: #666;
+  font-size: 13px;
+}
+
+/* 失败结果 */
+.failed-result {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  padding: 24px 0;
+}
+
+.failed-error {
+  margin: 0 0 8px;
+  color: #555;
+  font-size: 15px;
+}
+
+/* 降级空壳：无真实行程可展示 */
+.unavailable-block {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  padding: 48px 24px;
+}
+
+/* 左侧信息区：无地图时撑满右侧空间 */
+.left-info-expand {
+  flex: 1 1 auto;
+}
+
+/* 图片占位与图片告警 */
+.photo-placeholder-badge {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.photo-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.photo-warning {
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+  border-radius: 6px;
+  color: #d46b08;
+  font-size: 12px;
+  padding: 2px 8px;
 }
 
 /* 动画 */
