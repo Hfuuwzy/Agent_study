@@ -6,6 +6,7 @@
 全程离线：LLM / 高德 MCP / Unsplash 均为桩实现，不触碰真实 Key 与网络。
 """
 
+import threading
 import time
 import unittest
 
@@ -44,12 +45,16 @@ class RunContractTest(unittest.TestCase):
             unsplash_factory=lambda: self.unsplash,
         )
         self.runtime = AppRuntime(factory=factory)
+        self.addCleanup(self.runtime.close)
         app.dependency_overrides[get_app_runtime] = lambda: self.runtime
+        # 生命周期上下文：后台 Run 任务在请求间存活（受理→轮询跨请求），
+        # 避免每次请求新起 portal/loop 导致后台任务被回收（与 SSE 测试同一模式）。
         self.client = TestClient(app)
+        self.client.__enter__()
 
     def tearDown(self):
+        self.client.__exit__(None, None, None)
         app.dependency_overrides.clear()
-        self.client.close()
 
     def _poll_terminal(self, run_id, timeout=10.0):
         """轮询状态查询端点直到终态，返回终态响应体。"""
@@ -112,6 +117,7 @@ class RunContractTest(unittest.TestCase):
             unsplash_factory=lambda: StubUnsplash(),
         )
         runtime = AppRuntime(factory=factory)
+        self.addCleanup(runtime.close)
         app.dependency_overrides[get_app_runtime] = lambda: runtime
 
         accept = self.client.post("/api/trip/plan", json=VALID_REQUEST).json()
@@ -163,6 +169,78 @@ class RunStatusSchemaTest(unittest.TestCase):
         schema = app.openapi()
         run_status_enum = schema["components"]["schemas"]["RunStatus"]["enum"]
         self.assertEqual(sorted(run_status_enum), sorted(ALL_STATUSES))
+
+
+class RunSlowConstructionRegressionTest(unittest.TestCase):
+    """回归：慢构造（create_planner 内拉起 MCP 子进程）不得冻结事件循环。
+
+    受理与执行分离的完整语义：POST 立即受理；后台"构造 + 执行"整体在工作线程完成。
+    旧实现把 create_planner 放在事件循环上同步执行——POST 虽因 create_task 延后
+    启动 run 而立刻返回，但随后该 Run 的构造会冻结共享事件循环，阻塞其他所有请求
+    （含后续受理与 SSE 心跳）。本测试用生命周期客户端（受理与后续请求共享同一
+    事件循环）验证：构造进行期间，第二个请求必须仍然立即响应。
+    """
+
+    def setUp(self):
+        self.release_construction = threading.Event()
+        self.construction_entered = threading.Event()
+
+        def slow_amap_tool():
+            self.construction_entered.set()
+            self.release_construction.wait(timeout=8.0)
+            return StubAmapTool()
+
+        factory = RuntimeFactory(
+            llm_factory=lambda: StubLLM(),
+            amap_tool_factory=slow_amap_tool,
+            unsplash_factory=lambda: StubUnsplash(),
+        )
+        self.runtime = AppRuntime(factory=factory)
+        self.addCleanup(self.runtime.close)
+        app.dependency_overrides[get_app_runtime] = lambda: self.runtime
+        # 生命周期客户端：受理与后续请求共享同一事件循环，才能暴露事件循环阻塞问题
+        self.client = TestClient(app)
+        self.client.__enter__()
+
+    def tearDown(self):
+        self.release_construction.set()  # 放行可能仍阻塞的构造，避免遗留工作线程
+        self.client.__exit__(None, None, None)
+        app.dependency_overrides.clear()
+
+    def _poll_terminal(self, run_id, timeout=10.0):
+        """轮询状态查询端点直到终态（与 RunContractTest 同构）。"""
+        deadline = time.time() + timeout
+        last_status = None
+        while time.time() < deadline:
+            resp = self.client.get(f"/api/trip/runs/{run_id}")
+            self.assertEqual(resp.status_code, 200, "状态查询端点必须对已受理的 run_id 返回 200")
+            last_status = resp.json()["status"]
+            if last_status in TERMINAL_STATUSES:
+                return
+            time.sleep(0.02)
+        self.fail(f"run {run_id} 未在 {timeout}s 内到达终态，最后状态={last_status}")
+
+    def test_slow_planner_construction_does_not_block_event_loop(self):
+        """回归：create_planner 慢构造期间，同一事件循环上的后续请求必须立即响应。"""
+        accept = self.client.post("/api/trip/plan", json=VALID_REQUEST).json()
+        self.assertIn(accept["status"], ("pending", "running"))
+
+        # 等后台构造真正开始（进入慢构造桩后阻塞）
+        deadline = time.time() + 3.0
+        while not self.construction_entered.is_set() and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(self.construction_entered.is_set(), "后台构造必须在受理后启动")
+
+        # 构造尚未放行；同一事件循环上的请求必须不被冻结
+        t0 = time.monotonic()
+        resp = self.client.get("/api/trip/health")
+        elapsed = time.monotonic() - t0
+        self.assertEqual(resp.status_code, 200)
+        self.assertLess(elapsed, 1.0, f"构造阻塞期间事件循环被冻结，后续请求耗时 {elapsed:.2f}s")
+
+        # 放行构造，等待 Run 完整结束（避免遗留后台任务）
+        self.release_construction.set()
+        self._poll_terminal(accept["run_id"])
 
 
 if __name__ == "__main__":

@@ -87,9 +87,43 @@ export interface TripFormData {
   free_text_input: string
 }
 
-export interface TripPlanResponse {
-  success: boolean
+export type RunStatus = 'pending' | 'running' | 'success' | 'degraded' | 'failed'
+
+export interface RunAcceptance {
+  run_id: string
+  status: RunStatus
   message: string
-  data?: TripPlan
+}
+
+export interface RunStatusResponse {
+  run_id: string
+  status: RunStatus
+  request: TripFormData
+  result?: TripPlan
+  error?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RunCompletedPayload {
+  status: RunStatus
+  warnings?: string[]
+  error?: string
+  result?: TripPlan
+}
+
+export type RunEventType =
+  | 'run_started'
+  | 'step_started'
+  | 'tool_call'
+  | 'tool_result'
+  | 'validation_error'
+  | 'run_completed'
+
+export interface RunEvent {
+  run_id: string
+  type: RunEventType
+  data: Record<string, unknown>
+  timestamp: string
 }
 

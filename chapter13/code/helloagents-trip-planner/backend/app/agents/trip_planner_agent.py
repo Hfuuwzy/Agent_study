@@ -153,18 +153,21 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
 class MultiAgentTripPlanner:
     """多智能体旅行规划系统"""
 
-    def __init__(self, llm, amap_tool):
+    def __init__(self, llm, amap_tool, event_sink=None):
         """初始化多智能体系统：LLM 与高德 MCP 工具由调用方注入（真实实例或测试桩）。
 
         Args:
             llm: LLM 实例（须支持 invoke(messages) -> str，如 HelloAgentsLLM）
             amap_tool: 高德 MCP 工具（须支持 add_tool 的 auto_expand 展开契约，如 MCPTool）
+            event_sink: 可选事件发布函数 (event_type, data) -> None；四步编排各发一条
+                step_started（SSE 真实进度）。不提供则保持无事件行为。
         """
         print("🔄 开始初始化多智能体旅行规划系统...")
 
         try:
             self.llm = llm
             self.amap_tool = amap_tool
+            self.event_sink = event_sink
 
             # 共享MCP工具由调用方注入(底层只有一个MCP服务器进程)
             print("  - 使用注入的共享MCP工具...")
@@ -215,6 +218,14 @@ class MultiAgentTripPlanner:
             traceback.print_exc()
             raise
     
+    def _emit(self, event_type: str, data: dict) -> None:
+        """发布一条编排事件（有 event_sink 时）；sink 异常不影响规划主流程。"""
+        if self.event_sink is not None:
+            try:
+                self.event_sink(event_type, data)
+            except Exception:
+                pass
+
     def plan_trip(self, request: TripRequest) -> TripPlan:
         """
         使用多智能体协作生成旅行计划
@@ -236,24 +247,28 @@ class MultiAgentTripPlanner:
 
             # 步骤1: 景点搜索Agent搜索景点
             print("📍 步骤1: 搜索景点...")
+            self._emit("step_started", {"step": "attractions", "label": "搜索景点", "city": request.city})
             attraction_query = self._build_attraction_query(request)
             attraction_response = self.attraction_agent.run(attraction_query)
             print(f"景点搜索结果: {attraction_response[:200]}...\n")
 
             # 步骤2: 天气查询Agent查询天气
             print("🌤️  步骤2: 查询天气...")
+            self._emit("step_started", {"step": "weather", "label": "查询天气", "city": request.city})
             weather_query = f"请查询{request.city}的天气信息"
             weather_response = self.weather_agent.run(weather_query)
             print(f"天气查询结果: {weather_response[:200]}...\n")
 
             # 步骤3: 酒店推荐Agent搜索酒店
             print("🏨 步骤3: 搜索酒店...")
+            self._emit("step_started", {"step": "hotels", "label": "推荐酒店", "city": request.city})
             hotel_query = f"请搜索{request.city}的{request.accommodation}酒店"
             hotel_response = self.hotel_agent.run(hotel_query)
             print(f"酒店搜索结果: {hotel_response[:200]}...\n")
 
             # 步骤4: 行程规划Agent整合信息生成计划
             print("📋 步骤4: 生成行程计划...")
+            self._emit("step_started", {"step": "plan", "label": "生成行程计划", "city": request.city})
             planner_query = self._build_planner_query(request, attraction_response, weather_response, hotel_response)
             planner_response = self.planner_agent.run(planner_query)
             print(f"行程规划结果: {planner_response[:300]}...\n")
