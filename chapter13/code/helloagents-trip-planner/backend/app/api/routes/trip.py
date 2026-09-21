@@ -81,6 +81,7 @@ async def get_run_status(
         status=run.status,
         request=run.request,
         result=run.result,
+        warnings=list(run.warnings),
         error=run.error,
         created_at=run.created_at,
         updated_at=run.updated_at,

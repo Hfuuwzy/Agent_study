@@ -4,6 +4,7 @@ import json
 import re
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 
 import app.config  # noqa: F401  # 保证 load_dotenv() 先于 hello_agents 导入
 from hello_agents.tools import Tool
@@ -23,22 +24,41 @@ class StubLLM:
     provider = "stub"
     model = "stub-model"
 
-    def __init__(self, city="上海", start_date="2026-10-01", end_date="2026-10-03", travel_days=3, delay_per_invoke=0.0):
+    def __init__(
+        self,
+        city="上海",
+        start_date="2026-10-01",
+        end_date="2026-10-03",
+        travel_days=3,
+        delay_per_invoke=0.0,
+        plan_response=None,
+        tool_result_response=None,
+    ):
         self.city = city
         self.start_date = start_date
         self.end_date = end_date
         self.travel_days = travel_days
         self.calls = 0
         self.delay_per_invoke = delay_per_invoke
+        # 可注入失败响应：plan_response 覆盖规划提示词回答，tool_result_response 覆盖工具结果后的回答
+        self.plan_response = plan_response
+        self.tool_result_response = tool_result_response
+        # 记录每次 invoke 的最后一条用户消息，便于断言"某提示词未被调用"
+        self.recorded_queries = []
 
     def invoke(self, messages, **kwargs):
         self.calls += 1
         if self.delay_per_invoke:
             time.sleep(self.delay_per_invoke)
         last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+        self.recorded_queries.append(last_user)
         if "工具执行结果" in last_user:
+            if self.tool_result_response is not None:
+                return self.tool_result_response
             return "根据工具结果，已为您整理好相关信息。"
         if "请根据以下信息生成" in last_user:
+            if self.plan_response is not None:
+                return self.plan_response
             return self._plan_json()
         match = re.search(r"\[TOOL_CALL:[^\]]+\]", last_user)
         if match:
@@ -129,13 +149,16 @@ class StubLLM:
 class StubTool(Tool):
     """最简单的 Tool 桩：固定返回结果，记录每次调用的参数。"""
 
-    def __init__(self, name, description, result):
+    def __init__(self, name, description, result, error=None):
         super().__init__(name=name, description=description)
         self._result = result
+        self._error = error
         self.calls = []
 
     def run(self, parameters):
         self.calls.append(dict(parameters or {}))
+        if self._error is not None:
+            raise self._error
         return self._result
 
     def get_parameters(self):
@@ -198,6 +221,6 @@ class StubUnsplash:
             "photographer": "stub",
         }]
 
-    def get_photo_url(self, query):
+    def get_photo_url(self, query) -> Optional[str]:
         self.calls.append(query)
         return self.photo_url

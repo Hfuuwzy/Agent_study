@@ -17,6 +17,36 @@ from hello_agents.tools import Tool
 EventSink = Callable[[str, dict], None]
 
 
+class ToolFailureRecorder:
+    """记录工具执行失败的证据（tool_result 事件携带 error 字段）。
+
+    与 :class:`EventEmittingTool` 同源：探针发布 tool_result 事件时若带 error，
+    即为"该工具实际抛错"的结构化证据（非自然语言猜测）。录制器把供探针使用的
+    sink 包装为"先记录、再转发"，编排层在每步之后 drain() 取回该步的失败证据，
+    用于判定步骤是否降级。录制器在 factory 里按 Run 创建，随 Run 生命周期隔离。
+    """
+
+    def __init__(self) -> None:
+        self._evidence: List[str] = []
+
+    def wrap(self, event_sink: EventSink) -> EventSink:
+        """返回一个"先记录工具失败证据、再转发"的 sink。"""
+
+        def sink(event_type: str, data: dict) -> None:
+            if event_type == "tool_result" and data.get("error"):
+                tool_name = data.get("tool_name", "unknown")
+                self._evidence.append(f"工具 {tool_name} 执行失败: {data['error']}")
+            event_sink(event_type, data)
+
+        return sink
+
+    def drain(self) -> List[str]:
+        """取出并清空已记录的失败证据（编排层按步调用）。"""
+        evidence = self._evidence
+        self._evidence = []
+        return evidence
+
+
 class EventEmittingTool(Tool):
     """包装单个工具的探针：run 前后分别发 tool_call 与 tool_result 事件。"""
 

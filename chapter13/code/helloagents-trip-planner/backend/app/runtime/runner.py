@@ -6,7 +6,7 @@ from typing import Any, Callable, Optional
 
 from loguru import logger
 
-from ..models.schemas import TripPlan, TripRequest
+from ..models.schemas import PlanningOutcome, TripRequest
 from .events import RunEvent, RunEventType
 from .models import RunStatus
 from .registry import RunRegistry
@@ -45,7 +45,7 @@ class RunRunner:
 
         return sink
 
-    def _build_planner_and_plan(self, run_id: str, request: TripRequest) -> TripPlan:
+    def _build_planner_and_plan(self, run_id: str, request: TripRequest) -> PlanningOutcome:
         """构造编排器并执行规划：均为同步阻塞操作，合并进同一工作线程。
 
         ``create_planner`` 可能拉起高德 MCP 子进程（秒级阻塞），必须与 ``plan_trip``
@@ -54,6 +54,26 @@ class RunRunner:
         """
         planner = self.factory.create_planner(event_sink=self._make_sink(run_id))
         return planner.plan_trip(request)
+
+    def _publish_terminal(self, run_id: str) -> None:
+        """基于已提交的终态记录发布 run_completed（与 GET 状态查询严格一致）。
+
+        事件载荷取自注册表中已落定的终态记录而非局部变量，保证并发读取
+        （GET /runs/{id} 与 SSE）看到同一份终态：status / warnings / result / error。
+        """
+        record = self.registry.get(run_id)
+        if record is None:
+            return
+        data: dict = {
+            "status": record.status.value,
+            "warnings": list(record.warnings),
+        }
+        if record.result is not None:
+            data["result"] = record.result.model_dump()
+        if record.error is not None:
+            data["error"] = record.error
+        self._publish(run_id, RunEventType.run_completed, data)
+        logger.info("run_completed run_id={} status={}", run_id, record.status.value)
 
     async def run(self, run_id: str, request: TripRequest) -> None:
         """执行 Run：running -> success | degraded | failed，全程发布真实事件。"""
@@ -67,28 +87,22 @@ class RunRunner:
         try:
             if self._planner_executor_provider is not None:
                 loop = asyncio.get_running_loop()
-                trip_plan = await loop.run_in_executor(
+                outcome = await loop.run_in_executor(
                     self._planner_executor_provider(), self._build_planner_and_plan, run_id, request
                 )
             else:
                 # 无注入线程池时回退到事件循环默认执行器（独立构造 RunRunner 的场景）
-                trip_plan = await asyncio.to_thread(self._build_planner_and_plan, run_id, request)
+                outcome = await asyncio.to_thread(self._build_planner_and_plan, run_id, request)
             # 先落终态（保证并发 GET /runs/{id} 与 SSE 看到一致的终态），再发终态事件
-            self.registry.transition(run_id, RunStatus.success, result=trip_plan)
-            self._publish(run_id, RunEventType.run_completed, {
-                "status": RunStatus.success.value,
-                "warnings": [],
-                "result": trip_plan.model_dump(),
-            })
-            logger.info("run_completed run_id={} status=success", run_id)
+            status = RunStatus.success if not outcome.warnings else RunStatus.degraded
+            self.registry.transition(run_id, status, result=outcome.plan, warnings=outcome.warnings)
+            self._publish_terminal(run_id)
         except Exception as e:  # 依赖构造或执行失败 -> 显式 failed（不伪造成功）
             logger.error("run_failed run_id={} error={}", run_id, str(e))
-            self.registry.transition(run_id, RunStatus.failed, error=str(e))
-            self._publish(run_id, RunEventType.run_completed, {
-                "status": RunStatus.failed.value,
-                "warnings": [],
-                "error": str(e),
-            })
+            self.registry.transition(
+                run_id, RunStatus.failed, error=str(e), warnings=[f"生成旅行计划失败: {e}"]
+            )
+            self._publish_terminal(run_id)
         finally:
             # 终态事件已入历史，此后不再有新事件；关闭通道唤醒所有 SSE 等待者
             self.registry.close_channel(run_id)

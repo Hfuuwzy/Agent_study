@@ -61,8 +61,13 @@ class RunRegistry:
         status: RunStatus,
         result: Optional[TripPlan] = None,
         error: Optional[str] = None,
+        warnings: Optional[list[str]] = None,
     ) -> RunRecord:
-        """推进 Run 到新状态，可附带结果或错误；Run 不存在时抛 KeyError。"""
+        """推进 Run 到新状态，可附带结果、错误或告警清单；Run 不存在时抛 KeyError。
+
+        warnings 在锁内防御性拷贝：告警清单属于本 Run，不允许与调用方列表共享引用，
+        避免后续其他 Run 复用同一列表对象时互相污染。
+        """
         with self._lock:
             run = self._runs.get(run_id)
             if run is None:
@@ -72,6 +77,8 @@ class RunRegistry:
                 run.result = result
             if error is not None:
                 run.error = error
+            if warnings is not None:
+                run.warnings = list(warnings)
             run.updated_at = datetime.now(timezone.utc)
             return run
 
