@@ -1,8 +1,9 @@
 """数据模型定义"""
 
-from typing import List, Optional, Union
-from pydantic import BaseModel, Field, field_validator
+import re
 from datetime import date
+from typing import List, Optional, Union
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ============ 请求模型 ============
@@ -17,7 +18,33 @@ class TripRequest(BaseModel):
     accommodation: str = Field(..., description="住宿偏好", example="经济型酒店")
     preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
     free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
-    
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _validate_date(cls, value: str) -> str:
+        """校验日期格式（严格 YYYY-MM-DD）与日历合法性；非法值在请求层 422 拒绝。"""
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            raise ValueError("日期格式必须为 YYYY-MM-DD")
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"非法日期: {value}") from None
+        return value
+
+    @model_validator(mode="after")
+    def _validate_date_range(self) -> "TripRequest":
+        """交叉校验 start_date / end_date / travel_days 一致性（天数含首尾，与前端一致）。"""
+        start = date.fromisoformat(self.start_date)
+        end = date.fromisoformat(self.end_date)
+        if end < start:
+            raise ValueError("结束日期不能早于开始日期")
+        expected_days = (end - start).days + 1
+        if self.travel_days != expected_days:
+            raise ValueError(
+                f"travel_days 与日期区间不一致：日期区间为 {expected_days} 天，实际传入 {self.travel_days} 天"
+            )
+        return self
+
     class Config:
         json_schema_extra = {
             "example": {
