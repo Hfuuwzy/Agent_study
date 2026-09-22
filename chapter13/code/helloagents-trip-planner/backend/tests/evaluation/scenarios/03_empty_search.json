@@ -1,0 +1,26 @@
+{
+  "id": "empty_search",
+  "name": "搜索空结果：显式 degraded 诚实空壳，不伪造坐标、不触发规划",
+  "request": {
+    "city": "上海",
+    "start_date": "2026-10-01",
+    "end_date": "2026-10-03",
+    "travel_days": 3,
+    "transportation": "公共交通",
+    "accommodation": "经济型酒店",
+    "preferences": ["历史文化"],
+    "free_text_input": ""
+  },
+  "stubs": {
+    "attraction_mode": "empty",
+    "weather_mode": "default",
+    "hotel_mode": "default",
+    "plan_response": "default",
+    "unsplash_mode": "hit"
+  },
+  "expect": {
+    "kind": "degraded_empty_shell",
+    "http_status": 202,
+    "terminal_status": "degraded"
+  }
+}

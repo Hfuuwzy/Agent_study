@@ -1,0 +1,28 @@
+{
+  "id": "happy_path",
+  "name": "快乐路径：上海 3 天全流程 success，结构完整且图片未命中走占位契约",
+  "request": {
+    "city": "上海",
+    "start_date": "2026-10-01",
+    "end_date": "2026-10-03",
+    "travel_days": 3,
+    "transportation": "公共交通",
+    "accommodation": "经济型酒店",
+    "preferences": ["历史文化"],
+    "free_text_input": ""
+  },
+  "stubs": {
+    "attraction_mode": "default",
+    "weather_mode": "default",
+    "hotel_mode": "default",
+    "plan_response": "default",
+    "unsplash_mode": "miss"
+  },
+  "expect": {
+    "kind": "success_structure",
+    "http_status": 202,
+    "terminal_status": "success",
+    "assert_photo_miss_contract": true,
+    "searches_once": true
+  }
+}
