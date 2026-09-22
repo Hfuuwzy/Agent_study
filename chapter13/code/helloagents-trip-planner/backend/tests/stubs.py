@@ -165,13 +165,72 @@ class StubTool(Tool):
         return []
 
 
+DEFAULT_ATTRACTIONS_JSON = json.dumps({
+    "pois": [
+        {"id": "B0001", "name": "外滩", "address": "上海黄浦区中山东一路", "typecode": "风景名胜"},
+        {"id": "B0002", "name": "豫园", "address": "上海黄浦区", "typecode": "风景名胜"},
+    ],
+}, ensure_ascii=False)
+
+DEFAULT_HOTELS_JSON = json.dumps({
+    "pois": [
+        {"id": "H0001", "name": "上海快捷酒店", "address": "上海静安区南京西路", "typecode": "住宿服务"},
+    ],
+}, ensure_ascii=False)
+
+DEFAULT_WEATHER_JSON = json.dumps({
+    "city": "上海",
+    "forecasts": [
+        {
+            "date": "2026-10-01", "dayweather": "多云", "nightweather": "晴",
+            "daytemp": "24", "nighttemp": "18", "daywind": "东南风", "daypower": "1-3级",
+        },
+        {
+            "date": "2026-10-02", "dayweather": "晴", "nightweather": "多云",
+            "daytemp": "26", "nighttemp": "19", "daywind": "东南风", "daypower": "1-3级",
+        },
+        {
+            "date": "2026-10-03", "dayweather": "小雨", "nightweather": "阴",
+            "daytemp": "22", "nighttemp": "17", "daywind": "东风", "daypower": "3-4级",
+        },
+    ],
+}, ensure_ascii=False)
+
+
+class TextSearchStub(StubTool):
+    """文本搜索桩：按 keywords 区分景点 / 酒店，返回结构化 JSON（与真实契约一致）。
+
+    景点步骤的查询关键词来自用户偏好（如"历史文化"），酒店步骤固定为"酒店/宾馆"，
+    据此分流返回不同 POI 列表，模拟真实 amap-mcp-server 的行为。
+    """
+
+    def __init__(self, attractions_text=DEFAULT_ATTRACTIONS_JSON, hotel_text=DEFAULT_HOTELS_JSON):
+        super().__init__("amap_maps_text_search", "文本搜索POI", "")
+        self._attractions_text = attractions_text
+        self._hotel_text = hotel_text
+
+    def run(self, parameters):
+        self.calls.append(dict(parameters or {}))
+        keywords = str((parameters or {}).get("keywords", ""))
+        if "酒店" in keywords or "宾馆" in keywords:
+            return self._hotel_text
+        return self._attractions_text
+
+
 class StubAmapTool(Tool):
-    """高德 MCP 桩容器：auto_expand 展开为独立工具，且兼容 MCPTool.run 的调用协议。"""
+    """高德 MCP 桩容器：auto_expand 展开为独立工具，且兼容 MCPTool.run 的调用协议。
+
+    工具返回与 amap-mcp-server 真实契约一致的结构化 JSON（librarian 核查 2026-09-21）：
+    景点 / 酒店 text_search -> ``{"pois": [{"id", "name", "address", "typecode"}]}``；
+    天气 -> ``{"city", "forecasts": [{"date", "day_weather", ...}]}``。
+    供中间结果类型化（工单 04）按真实输出形状解析。
+    """
 
     def __init__(
         self,
-        attractions_text="外滩\n地址: 上海黄浦区中山东一路\n坐标: 121.490317,31.240036",
-        weather_text="上海 多云 24°C~18°C 东南风1-3级",
+        attractions_text=DEFAULT_ATTRACTIONS_JSON,
+        weather_text=DEFAULT_WEATHER_JSON,
+        hotel_text=DEFAULT_HOTELS_JSON,
     ):
         super().__init__(name="amap", description="高德地图服务(测试桩)")
         self.auto_expand = True
@@ -180,7 +239,7 @@ class StubAmapTool(Tool):
             {"name": "maps_weather", "description": "查询天气"},
         ]
         self.tools = {
-            "amap_maps_text_search": StubTool("amap_maps_text_search", "文本搜索POI", attractions_text),
+            "amap_maps_text_search": TextSearchStub(attractions_text, hotel_text),
             "amap_maps_weather": StubTool("amap_maps_weather", "查询天气", weather_text),
         }
 
