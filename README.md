@@ -194,6 +194,8 @@ WARNING: TF-IDF模型未训练，请先调用fit()方法
 | [第九章](chapter09/) | 上下文工程 | GSSC流水线、ContextBuilder、长时程代码助手 | ✅ 已完成 |
 | [第十章](chapter10/) | 智能体通信协议 | MCP、A2A、ANP 三大协议实践、天气 MCP 服务 | ✅ 已完成 |
 | [第十一章](chapter11/) | Agentic-RL | 智能体强化学习：SFT/GRPO/LoRA 训练流水线 | 🔄 学习中 |
+| 第十二章 | 智能体性能评估 | 教程评估框架（按指示跳过，直接进入第十三章） | ⏭️ 已跳过 |
+| [第十三章](chapter13/) | 智能旅行助手 | MCP + 多智能体协作；Agent 运行时升级：Run 状态机 / SSE 真实进度 / 显式降级 | ✅ 已完成 |
 
 ---
 
@@ -389,6 +391,32 @@ WARNING: TF-IDF模型未训练，请先调用fit()方法
 
 ---
 
+### 第十三章：智能旅行助手（MCP 与多智能体协作）✅ 已完成
+**核心概念：**
+- 四专职 SimpleAgent 协作（景点/天气/酒店/规划），共享 1 个高德地图 MCPTool（`auto_expand` 工具爆炸）
+- 前后端分离 Web 应用：FastAPI 后端 + Vue3 前端，Pydantic 模型全链路校验
+- **Agent 运行时升级**（本次重点）：一次请求对应一个带唯一 `run_id` 的 **Run**，显式状态机 + SSE 真实进度推送 + 三态显式降级
+
+**升级要点（Run 状态机 / SSE 真实进度 / 显式降级）：**
+- **受理与执行分离**：`POST /api/trip/plan` 立即返回 `run_id`（202 受理），计划在后台执行，前端不再干等 50 分钟
+- **状态机**：`pending → running → success | degraded | failed`，状态与事件流驻留进程内存（零落盘）
+- **SSE 真实进度**：`run_started / step_started / tool_call / tool_result / validation_error / run_completed` 六类事件，前端按真实步骤渲染，假计时器进度条下线
+- **显式降级取代伪造兜底**：终态三态携带 `warnings` 失败清单；移除北京基准假坐标与错城市图片，降级时返回空壳计划并如实标注
+- **每步独立重试**：最终规划有界重试（3 次、指数退避 0.1s/0.2s），失败不走伪装成功而是显式 `failed`
+- **中间结果类型化 + 输入隔离**：搜索输出经 Pydantic schema 校验白名单字段后组装提示词；用户自由文本/工具返回按不可信数据隔离
+
+**设计权衡（ADR 结论）：**
+- ADR-0001 兜底保留但必须显式标注（可运行性优先于局部真实，但不伪装成功）
+- ADR-0002 升级以"可运行 + 可讲明白"为准绳，不做通用编排抽象（面试用状态模型可映射的论述替代 LangGraph）
+- ADR-0003 Run 状态驻留进程内存，不落盘、不引入数据库（零写盘边界）
+
+**关键代码：**
+- `chapter13/code/helloagents-trip-planner/backend/app/runtime/` — Run 状态机/SSE/降级核心
+- `chapter13/code/helloagents-trip-planner/backend/app/agents/trip_planner_agent.py` — 四智能体编排
+- `chapter13/code/helloagents-trip-planner/backend/tests/evaluation/` — 5 条黄金评测集 + 离线评测（唯一 API 测试缝）
+
+---
+
 ## 🚀 快速开始
 
 ### 运行环境测试（以第八章示例为参考，已验证可跑通）
@@ -475,6 +503,12 @@ Agent_study/
 ├── chapter11/                    # 第十一章：Agentic-RL 🔄 学习中
 │   ├── README.md
 │   └── code/
+├── chapter13/                    # 第十三章：智能旅行助手 ✅
+│   ├── README.md
+│   ├── CONTEXT.md                 # 领域术语（Run/TripPlan/降级运行/图片兜底）
+│   ├── docs/
+│   │   └── adr/                   # ADR 0001-0003（显式降级/不做通用抽象/零落盘）
+│   └── code/helloagents-trip-planner/   # 前后端 + 评测
 ├── knowledge_base/               # RAG 知识库目录
 ├── memory_data/                  # 记忆数据存储
 ├── notes/                        # 学习笔记附件
@@ -489,6 +523,7 @@ Agent_study/
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-09-23 | 完成第十三章 Agent 运行时升级（Run 状态机 / SSE 真实进度 / 显式降级）；根 README 章节表推进至 Ch13，升级事实与 ADR 结论同步 |
 | 2026-08-25 | 第十章：智能体通信协议合并进 main（PR #7）；开始第十一章 Agentic-RL 学习准备（README+教程代码就位）；同步全项目文档状态 |
 | 2026-08-21 | 完成第九章：上下文工程，GSSC 流水线全流程跑通（PR #6 合并） |
 | 2026-07-06 | 完成第八章：记忆与检索，解决环境迁移全套问题，PDF入库+GPU加速+RAG检索全流程跑通 |
