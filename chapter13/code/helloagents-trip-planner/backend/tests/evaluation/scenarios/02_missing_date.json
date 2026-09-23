@@ -1,0 +1,26 @@
+{
+  "id": "missing_date",
+  "name": "缺日期字段：请求层 422 拒绝，零 Run 受理、零 LLM/工具调用",
+  "request": {
+    "city": "上海",
+    "start_date": "2026-10-01",
+    "travel_days": 3,
+    "transportation": "公共交通",
+    "accommodation": "经济型酒店",
+    "preferences": ["历史文化"],
+    "free_text_input": ""
+  },
+  "stubs": {
+    "attraction_mode": "default",
+    "weather_mode": "default",
+    "hotel_mode": "default",
+    "plan_response": "default",
+    "unsplash_mode": "hit"
+  },
+  "expect": {
+    "kind": "rejected",
+    "http_status": 422,
+    "loc": ["body", "end_date"],
+    "error_types": ["missing"]
+  }
+}

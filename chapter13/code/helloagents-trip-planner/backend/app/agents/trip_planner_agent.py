@@ -21,6 +21,7 @@ from ..models.intermediates import (
     WeatherResult,
 )
 from ..models.schemas import PlanningOutcome, TripRequest, TripPlan
+from .final_plan_retry import plan_final_with_retry
 from .input_isolation import (
     FIELD_LIMIT,
     FREE_TEXT_LIMIT,
@@ -99,7 +100,7 @@ class MultiAgentTripPlanner:
                 system_prompt=PLANNER_AGENT_PROMPT
             )
 
-            print(f"✅ 多智能体系统初始化成功")
+            print("✅ 多智能体系统初始化成功")
             print(f"   景点搜索Agent: {len(self.attraction_agent.list_tools())} 个工具")
             print(f"   天气查询Agent: {len(self.weather_agent.list_tools())} 个工具")
             print(f"   酒店推荐Agent: {len(self.hotel_agent.list_tools())} 个工具")
@@ -173,8 +174,12 @@ class MultiAgentTripPlanner:
         planner_query, isolation_warnings = self._build_planner_query(
             request, attractions, weather, hotels
         )
-        planner_response = self.planner_agent.run(planner_query)
-        trip_plan = self._parse_response(planner_response, request)
+        # 最终规划有界重试（最多 3 次总尝试）：仅当规划响应无法解析/校验为
+        # TripPlan 时重试规划器本身；已完成的搜索步骤不会被再次执行。
+        trip_plan = plan_final_with_retry(
+            run=lambda: self.planner_agent.run(planner_query),
+            parse=lambda response: self._parse_response(response, request),
+        )
         return PlanningOutcome(plan=trip_plan, warnings=step_warnings + isolation_warnings)
 
     def _drain_failure_evidence(self, label: str) -> list[str]:
@@ -431,6 +436,9 @@ class MultiAgentTripPlanner:
 
         # 解析JSON
         data = json.loads(json_str)
+        if not isinstance(data, dict):
+            # 结构性非法（如 JSON 数组）统一以 ValueError 表达，纳入重试判定
+            raise ValueError("响应中的 JSON 不是对象，无法构造行程计划")
 
         # 转换为TripPlan对象
         return TripPlan(**data)
@@ -458,4 +466,3 @@ def _extract_json(raw: str) -> dict | None:
         except json.JSONDecodeError:
             return None
     return None
-
