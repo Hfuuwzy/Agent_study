@@ -45,6 +45,7 @@ def plan_final_with_retry(
     max_attempts: int = FINAL_PLAN_MAX_ATTEMPTS,
     backoff: Sequence[float] = FINAL_PLAN_BACKOFF,
     sleep: Callable[[float], None] = time.sleep,
+    on_retry: Callable[[int, float], None] | None = None,
 ) -> TripPlan:
     """有界重试最终规划步骤：响应不可解析/不可校验为 TripPlan 时重新运行规划器。
 
@@ -58,6 +59,8 @@ def plan_final_with_retry(
         backoff: 重试间等待的秒数序列，按失败次数依次取用；耗尽后沿用末位。
         sleep: 等待函数（默认 ``time.sleep``）。可注入为记录桩，使测试能验证
             退避序列而不消耗真实时间；不经 HTTP 契约暴露。
+        on_retry: 可选回调，在第 ``attempt`` 次尝试前的退避等待之前调用，参数为
+            ``(attempt, delay)``，供调用方记录重试诊断；不改变重试语义。
 
     Raises:
         FinalPlanError: 连续 ``max_attempts`` 次失败（携带最后一次失败原因）。
@@ -66,6 +69,8 @@ def plan_final_with_retry(
     for attempt in range(1, max_attempts + 1):
         if attempt > 1 and backoff:
             delay = backoff[min(attempt - 2, len(backoff) - 1)]
+            if on_retry is not None:
+                on_retry(attempt, delay)
             sleep(delay)
         response = run()
         try:

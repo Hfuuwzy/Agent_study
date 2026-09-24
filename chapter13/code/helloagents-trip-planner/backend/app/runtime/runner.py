@@ -35,15 +35,47 @@ class RunRunner:
         self.registry.publish(run_id, RunEvent(run_id=run_id, type=event_type, data=data))
 
     def _make_sink(self, run_id: str):
-        """构造事件发布函数（event_type, data）-> None，注入工厂/编排器。"""
+        """构造事件发布函数（event_type, data）-> None，注入工厂/编排器。
+
+        事件既是 SSE 的公开契约，也是控制台诊断的一部分：此处把每条事件
+        同步输出到 loguru（含工具调用参数与结果预览），使后端终端能够与前端
+        SSE 渲染逐个步骤对照，而不必依赖抓包/浏览器。
+        """
 
         def sink(event_type: str, data: dict) -> None:
             try:
-                self._publish(run_id, RunEventType(event_type), data)
+                etype = RunEventType(event_type)
             except ValueError:
                 logger.warning("run_id={} 忽略未知事件类型 event_type={}", run_id, event_type)
+                return
+            self._log_event(run_id, etype, data)
+            self._publish(run_id, etype, data)
 
         return sink
+
+    @staticmethod
+    def _log_event(run_id: str, etype: RunEventType, data: dict) -> None:
+        """把一条 Run 事件以 loguru 结构化日志输出到控制台（不写文件）。"""
+        if etype is RunEventType.run_started:
+            logger.info("event=run_started run_id={} city={} travel_days={}",
+                        run_id, data.get("city"), data.get("travel_days"))
+        elif etype is RunEventType.step_started:
+            logger.info("event=step_started run_id={} step={} label={} city={}",
+                        run_id, data.get("step"), data.get("label"), data.get("city"))
+        elif etype is RunEventType.tool_call:
+            logger.info("event=tool_call run_id={} tool={} params={}",
+                        run_id, data.get("tool_name"), data.get("parameters"))
+        elif etype is RunEventType.tool_result:
+            if data.get("error"):
+                logger.error("event=tool_result run_id={} tool={} error={}",
+                             run_id, data.get("tool_name"), data.get("error"))
+            else:
+                preview = data.get("result_preview")
+                logger.info("event=tool_result run_id={} tool={} result={}",
+                            run_id, data.get("tool_name"), preview)
+        elif etype is RunEventType.validation_error:
+            logger.warning("event=validation_error run_id={} step={} label={} error={}",
+                           run_id, data.get("step"), data.get("label"), data.get("error"))
 
     def _build_planner_and_plan(self, run_id: str, request: TripRequest) -> PlanningOutcome:
         """构造编排器并执行规划：均为同步阻塞操作，合并进同一工作线程。
@@ -53,7 +85,7 @@ class RunRunner:
         的受理与 SSE 心跳。构造失败与执行失败在此同样抛出，由 run() 统一落 failed。
         """
         planner = self.factory.create_planner(event_sink=self._make_sink(run_id))
-        return planner.plan_trip(request)
+        return planner.plan_trip(request, run_id=run_id)
 
     def _publish_terminal(self, run_id: str) -> None:
         """基于已提交的终态记录发布 run_completed（与 GET 状态查询严格一致）。

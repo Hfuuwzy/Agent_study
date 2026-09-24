@@ -3,11 +3,19 @@
 工单 04：三个搜索步骤的输出经 Pydantic schema 校验为类型化中间结果（见
 ``models.intermediates``），规划提示词只基于类型化结果的白名单字段组装；用户自由
 文本与工具返回内容按不可信数据隔离（见 ``input_isolation``），注入指令不进入提示词。
+
+本模块另承载两个升级点：
+- 三个搜索步骤各自**有界重试**（``search_step_retry``：3 次、指数退避 0.1s->0.2s），
+  只重试失败的那一步，不重跑已成功步骤；耗尽保持显式降级（None + warnings，不伪造成功）。
+- 每步 **loguru 控制台诊断**：以 ``run_id`` 为贯穿标识，记录 step / status / elapsed_ms /
+  error（含重试与耗尽），不写日志文件、不改变执行行为。
 """
 
 import json
+import time
 from typing import Callable, Protocol, Sequence, TypeVar, Union
 
+from loguru import logger
 from pydantic import ValidationError
 
 from .. import config as _config  # noqa: F401  # 保证 load_dotenv() 先于 hello_agents 导入
@@ -21,7 +29,8 @@ from ..models.intermediates import (
     WeatherResult,
 )
 from ..models.schemas import PlanningOutcome, TripRequest, TripPlan
-from .final_plan_retry import plan_final_with_retry
+from .final_plan_retry import FINAL_PLAN_MAX_ATTEMPTS, FinalPlanError, plan_final_with_retry
+from .search_step_retry import SEARCH_STEP_MAX_ATTEMPTS, retry_search_step
 from .input_isolation import (
     FIELD_LIMIT,
     FREE_TEXT_LIMIT,
@@ -42,7 +51,15 @@ _STEP_RESULT = TypeVar("_STEP_RESULT")
 class MultiAgentTripPlanner:
     """多智能体旅行规划系统"""
 
-    def __init__(self, llm, amap_tool, event_sink=None, failure_recorder=None, result_recorder=None):
+    def __init__(
+        self,
+        llm,
+        amap_tool,
+        event_sink=None,
+        failure_recorder=None,
+        result_recorder=None,
+        search_sleep: Callable[[float], None] = time.sleep,
+    ):
         """初始化多智能体系统：LLM 与高德 MCP 工具由调用方注入（真实实例或测试桩）。
 
         Args:
@@ -52,6 +69,7 @@ class MultiAgentTripPlanner:
                 step_started（SSE 真实进度）。不提供则保持无事件行为。
             failure_recorder: 可选 ToolFailureRecorder（工具失败证据，按 Run 隔离）。
             result_recorder: 可选 ToolResultRecorder（工具成功原始结果，供中间结果类型化）。
+            search_sleep: 搜索步骤重试的等待函数；生产默认 time.sleep，测试可注入记录桩。
         """
         print("🔄 开始初始化多智能体旅行规划系统...")
 
@@ -61,6 +79,8 @@ class MultiAgentTripPlanner:
             self.event_sink = event_sink
             self.failure_recorder = failure_recorder
             self.result_recorder = result_recorder
+            self._run_id: str | None = None
+            self._search_sleep = search_sleep
 
             # 共享MCP工具由调用方注入(底层只有一个MCP服务器进程)
             print("  - 使用注入的共享MCP工具...")
@@ -119,8 +139,14 @@ class MultiAgentTripPlanner:
             except Exception:
                 pass
 
-    def plan_trip(self, request: TripRequest) -> PlanningOutcome:
-        """按四步流水线生成计划；搜索步骤输出经类型化中间结果校验，失败显式降级。"""
+    def plan_trip(self, request: TripRequest, run_id: str | None = None) -> PlanningOutcome:
+        """按四步流水线生成计划；搜索步骤输出经类型化中间结果校验，失败显式降级。
+
+        Args:
+            request: 旅行请求。
+            run_id: 本次运行的唯一标识，用于 loguru 步骤诊断的贯穿关联；由 runner 注入。
+        """
+        self._run_id = run_id
         print(f"\n{'='*60}")
         print("🚀 开始多智能体协作规划旅行...")
         print(f"目的地: {request.city}")
@@ -176,10 +202,32 @@ class MultiAgentTripPlanner:
         )
         # 最终规划有界重试（最多 3 次总尝试）：仅当规划响应无法解析/校验为
         # TripPlan 时重试规划器本身；已完成的搜索步骤不会被再次执行。
-        trip_plan = plan_final_with_retry(
-            run=lambda: self.planner_agent.run(planner_query),
-            parse=lambda response: self._parse_response(response, request),
-        )
+        plan_started = time.monotonic()
+
+        def on_plan_retry(next_attempt: int, delay: float) -> None:
+            logger.warning(
+                "step_retrying run_id={} step=plan label=生成行程计划 next_attempt={} max_attempts={} backoff_s={} delay_ms={}",
+                self._run_id, next_attempt, FINAL_PLAN_MAX_ATTEMPTS, delay, int(delay * 1000),
+            )
+
+        try:
+            trip_plan = plan_final_with_retry(
+                run=lambda: self.planner_agent.run(planner_query),
+                parse=lambda response: self._parse_response(response, request),
+                on_retry=on_plan_retry,
+            )
+            elapsed_ms = int((time.monotonic() - plan_started) * 1000)
+            logger.info(
+                "step_completed run_id={} step=plan label=生成行程计划 status=success elapsed_ms={}",
+                self._run_id, elapsed_ms,
+            )
+        except FinalPlanError as e:
+            elapsed_ms = int((time.monotonic() - plan_started) * 1000)
+            logger.error(
+                "step_exhausted run_id={} step=plan label=生成行程计划 attempts={} max_attempts={} elapsed_ms={} error={}",
+                self._run_id, e.attempts, FINAL_PLAN_MAX_ATTEMPTS, elapsed_ms, e.last_error,
+            )
+            raise
         return PlanningOutcome(plan=trip_plan, warnings=step_warnings + isolation_warnings)
 
     def _drain_failure_evidence(self, label: str) -> list[str]:
@@ -210,21 +258,53 @@ class MultiAgentTripPlanner:
             (typed, warnings)：成功返回 (typed, [])；失败返回 (None, warnings)。
         """
         self._emit("step_started", {"step": step, "label": label, "city": request.city})
-        agent.run(query)
-        warnings = self._drain_failure_evidence(label)
-        raw_results = self.result_recorder.drain() if self.result_recorder is not None else {}
-        raw = raw_results.get(tool_name, "")
-        if not raw:
-            if not warnings:
-                warnings.append(f"{label}失败: 未捕获到工具返回结果")
-            return None, warnings
-        typed, error = parser(raw)
-        if error is not None:
-            warnings.append(f"{label}失败: 中间结果校验失败: {error}")
-            self._emit("validation_error", {"step": step, "label": label, "error": error})
-            return None, warnings
-        # 即使步骤最终产出类型化结果，也要保留本步内发生过的工具失败证据
-        #（如"先失败、重试后成功"），由调用方按 warnings 判定是否降级——不吞掉失败。
+        step_started = time.monotonic()
+
+        def attempt() -> tuple[_STEP_RESULT | None, list[str], dict | None]:
+            """执行一次完整搜索尝试；每次都 drain 录制器，隔离前一次结果。"""
+            agent.run(query)
+            warnings = self._drain_failure_evidence(label)
+            raw_results = self.result_recorder.drain() if self.result_recorder is not None else {}
+            raw = raw_results.get(tool_name, "")
+            if not raw:
+                if not warnings:
+                    warnings.append(f"{label}失败: 未捕获到工具返回结果")
+                return None, warnings, None
+            typed, error = parser(raw)
+            if error is not None:
+                warnings.append(f"{label}失败: 中间结果校验失败: {error}")
+                return None, warnings, {"step": step, "label": label, "error": error}
+            # 即使步骤最终产出类型化结果，也要保留本步内发生过的工具失败证据
+            #（如"先失败、重试后成功"），由调用方按 warnings 判定是否降级——不吞掉失败。
+            return typed, warnings, None
+
+        def on_retry(next_attempt: int, delay: float) -> None:
+            logger.warning(
+                "step_retrying run_id={} step={} label={} next_attempt={} max_attempts={} backoff_s={} delay_ms={}",
+                self._run_id, step, label, next_attempt, SEARCH_STEP_MAX_ATTEMPTS,
+                delay, int(delay * 1000),
+            )
+
+        typed, warnings, attempts, validation_error = retry_search_step(
+            attempt,
+            sleep=self._search_sleep,
+            on_retry=on_retry,
+        )
+        elapsed_ms = int((time.monotonic() - step_started) * 1000)
+        if typed is None:
+            if validation_error is not None:
+                self._emit("validation_error", validation_error)
+            error = warnings[-1] if warnings else "未捕获到有效工具结果"
+            logger.error(
+                "step_exhausted run_id={} step={} label={} attempts={} max_attempts={} elapsed_ms={} error={}",
+                self._run_id, step, label, attempts, SEARCH_STEP_MAX_ATTEMPTS, elapsed_ms, error,
+            )
+        else:
+            status = "recovered" if attempts > 1 else "success"
+            logger.info(
+                "step_completed run_id={} step={} label={} status={} attempts={} max_attempts={} elapsed_ms={}",
+                self._run_id, step, label, status, attempts, SEARCH_STEP_MAX_ATTEMPTS, elapsed_ms,
+            )
         return typed, warnings
 
     def _degraded_outcome(self, request: TripRequest, warnings: list[str]) -> PlanningOutcome:
