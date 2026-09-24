@@ -237,9 +237,10 @@ const RUN_STEPS = [
   { key: 'plan', label: '生成行程计划', icon: '📋' }
 ]
 
-const currentStepIndex = computed(() => {
+const currentStepIndex = computed<number | undefined>(() => {
+  if (!currentStep.value) return undefined
   const index = RUN_STEPS.findIndex((step) => step.key === currentStep.value)
-  return index < 0 ? 0 : index
+  return index < 0 ? undefined : index
 })
 
 // 真实步骤状态驱动 a-steps：完成 / 进行中 / 等待
@@ -332,9 +333,11 @@ const handleRunEvent = (event: RunEvent) => {
         : `✅ 已获取 ${toolName} 数据`
       break
     }
-    case 'validation_error':
-      toolActivity.value = `⚠️ ${event.data.message || '输出校验未通过'}`
+    case 'validation_error': {
+      const validationMessage = event.data.error || event.data.message || '输出校验未通过'
+      toolActivity.value = `⚠️ ${String(validationMessage)}`
       break
+    }
     case 'run_completed':
       handleRunCompleted(event.run_id, event.data as unknown as RunCompletedPayload)
       break
